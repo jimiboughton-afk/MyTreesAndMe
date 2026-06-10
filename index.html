@@ -162,6 +162,31 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
 .minibtn { font-size: 12px; font-weight: 600; color: var(--bark); padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; margin-right: 6px; }
 .minibtn.danger { color: var(--danger); }
 
+/* Care bar + card stat block */
+.carebar { display: flex; gap: 8px; overflow-x: auto; margin: 12px 0 0; padding-bottom: 2px; }
+.cchip { flex: none; display: flex; flex-direction: column; align-items: center; gap: 1px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 12px; min-width: 66px; }
+.cchip .ce { font-size: 17px; }
+.cchip .cl { font-size: 10px; color: var(--ink-soft); font-weight: 600; letter-spacing: .02em; }
+.cchip .cv { font-size: 13px; font-weight: 700; color: var(--green); }
+.cchip:active { background: var(--green-soft); }
+.card .stats { margin-top: 7px; border-top: 1px solid var(--line); padding-top: 5px; font-size: 11px; }
+.card .srow { display: flex; justify-content: space-between; gap: 6px; padding: 2px 0; color: var(--ink-soft); }
+.card .srow .sk { font-weight: 650; letter-spacing: .03em; }
+.card .srow.style { color: var(--bark); font-weight: 600; }
+.card .srow.care { font-variant-numeric: tabular-nums; }
+.card .srow.care span { white-space: nowrap; }
+.tl .dot.care { background: #5E8FB0; }
+
+/* Timeline filters + pinned notes */
+.filters { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto; padding-bottom: 2px; }
+.fchip { font-size: 12.5px; font-weight: 600; padding: 7px 13px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--ink-soft); white-space: nowrap; flex: none; }
+.fchip.active { background: var(--green); border-color: var(--green); color: #F4F1E6; }
+.pinstrip { background: #FBF6E3; border: 1px solid #E8DCB4; border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px; }
+.pinstrip .ph2 { font-size: 11.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--bark); margin-bottom: 4px; }
+.pinstrip .pn { font-size: 14.5px; padding: 7px 0; border-bottom: 1px dashed #E8DCB4; display: flex; gap: 10px; justify-content: space-between; align-items: flex-start; }
+.pinstrip .pn:last-child { border-bottom: none; padding-bottom: 2px; }
+.pinstrip .pn span:first-child { overflow-wrap: anywhere; }
+
 /* Details list */
 .dl { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
 .dl .row { display: flex; justify-content: space-between; gap: 14px; padding: 13px 15px; border-bottom: 1px solid var(--line); font-size: 14.5px; }
@@ -290,6 +315,43 @@ const METRICS = [
   { id: "spread", name: "Canopy spread", unit: "mm" },
   { id: "internode", name: "Internode length", unit: "mm" }
 ];
+
+const TREE_STYLES = ["Not styled yet", "Formal upright (Chokkan)", "Informal upright (Moyogi)",
+  "Slanting (Shakan)", "Cascade (Kengai)", "Semi-cascade (Han-kengai)", "Literati (Bunjin)",
+  "Windswept (Fukinagashi)", "Broom (Hokidachi)", "Twin trunk", "Clump", "Forest (Yose-ue)",
+  "Root-over-rock", "Raft", "Other"];
+
+/* Care vitals: quick:true chips one-tap log a care event; the others
+   read their days-since from matching work-sheet entries. */
+const CARE_DEFS = [
+  { id: "water", emoji: "💧", label: "Watered",    careType: "Watered",    quick: true },
+  { id: "fert",  emoji: "🌱", label: "Fertilised", careType: "Fertilised", quick: true, workType: "Fertilise" },
+  { id: "mist",  emoji: "💦", label: "Misted",     careType: "Misted",     quick: true },
+  { id: "repot", emoji: "🪴", label: "Repotted",   workType: "Repot" },
+  { id: "prune", emoji: "✂️", label: "Pruned",     workType: "Prune" }
+];
+
+function lastCareTime(events, def) {
+  let last = null;
+  for (const e of events) {
+    const hit = (e.type === "care" && e.careType === def.careType) ||
+                (e.type === "work" && def.workType && e.workType === def.workType);
+    if (hit) {
+      const t = new Date(e.date).getTime();
+      if (last === null || t > last) last = t;
+    }
+  }
+  return last;
+}
+function agoText(ts) {
+  if (!ts) return "—";
+  const d = Math.floor((Date.now() - ts) / 864e5);
+  if (d <= 0) return "today";
+  if (d < 14) return d + "d";
+  if (d < 60) return Math.round(d / 7) + "wk";
+  if (d < 365) return Math.round(d / 30.4) + "mo";
+  return (Math.round(d / 36.5) / 10) + "yr";
+}
 
 /* ============================================================
    INDEXEDDB LAYER  (spec §5, §6 — schema versioned from day one)
@@ -463,7 +525,7 @@ const NAV = [
   { id: "backup",     ic: "💾", t: "Backup & Restore" },
   { id: "settings",   ic: "⚙️", t: "Settings" }
 ];
-const state = { view: "collection", treeId: null, tab: "timeline" };
+const state = { view: "collection", treeId: null, tab: "timeline", tlFilter: "all" };
 
 function buildDrawer() {
   $("#drawernav").innerHTML = NAV.map(n =>
@@ -478,6 +540,7 @@ function go(view, treeId) {
   state.view = view;
   state.treeId = treeId || null;
   state.tab = "timeline";
+  state.tlFilter = "all";
   openDrawer(false);
   render();
 }
@@ -548,6 +611,11 @@ async function renderCollection(main) {
     const attn = await attentionInfo(tree, events);
     const stage = stageOf(tree);
     const hero = tree.heroPhotoId ? await dbGet("photos", tree.heroPhotoId) : null;
+    const styleShort = tree.style && tree.style !== "Not styled yet" ? tree.style.replace(/\s*\(.*\)$/, "") : null;
+    const careHTML = ["water", "fert", "repot", "prune"].map(id => {
+      const def = CARE_DEFS.find(d => d.id === id);
+      return "<span>" + def.emoji + " " + agoText(lastCareTime(events, def)) + "</span>";
+    }).join("");
     const btn = document.createElement("button");
     btn.className = "card";
     btn.innerHTML =
@@ -555,8 +623,11 @@ async function renderCollection(main) {
       (attn ? '<span class="attn" title="' + esc(attn.reason) + '">!</span>' : "") +
       '<div class="body"><div class="nick">' + esc(tree.nickname) + "</div>" +
       '<div class="sp">' + esc(tree.species || "Species unknown") + "</div>" +
-      '<div class="meta"><span class="stagechip">' + stage.emoji + " " + stage.name + "</span>" +
-      '<span class="agechip">' + esc(ageText(tree)) + "</span></div></div>";
+      '<div class="stats">' +
+      '<div class="srow"><span class="sk">' + stage.emoji + " " + stage.name + "</span><span>" + esc(ageText(tree) || "age —") + "</span></div>" +
+      (styleShort ? '<div class="srow style"><span class="sk">Style</span><span>' + esc(styleShort) + "</span></div>" : "") +
+      '<div class="srow care">' + careHTML + "</div>" +
+      "</div></div>";
     btn.addEventListener("click", () => go("profile", tree.id));
     grid.appendChild(btn);
   }
@@ -573,6 +644,8 @@ function addTreeSheet() {
     '<label for="f-acq">Date acquired</label><input id="f-acq" type="date" value="' + todayISO() + '">' +
     '<label for="f-age">Age when acquired (years, best guess)</label><input id="f-age" type="number" min="0" step="0.5" placeholder="0">' +
     '<label for="f-stage">Stage</label><select id="f-stage">' + stageOpts + "</select>" +
+    '<label for="f-style">Bonsai style</label><select id="f-style">' +
+    TREE_STYLES.map(s => "<option>" + s + "</option>").join("") + "</select>" +
     '<label for="f-target">Target trunk caliper (mm — optional for now)</label><input id="f-target" type="number" min="1" placeholder="e.g. 80">' +
     '<button class="btn" id="f-save">Add to collection</button>' +
     '<button class="btn secondary" id="f-cancel">Cancel</button>',
@@ -588,6 +661,7 @@ function addTreeSheet() {
           acquiredDate: el.querySelector("#f-acq").value || todayISO(),
           ageAtAcquisition: Number(el.querySelector("#f-age").value) || 0,
           stage: el.querySelector("#f-stage").value,
+          style: el.querySelector("#f-style").value,
           targetCaliper: Number(el.querySelector("#f-target").value) || null,
           heroPhotoId: null,
           potHistory: "",
@@ -645,6 +719,19 @@ async function renderProfile(main) {
   if (next) heroEl.querySelector("#promotebtn").addEventListener("click", () => promoteSheet(tree, next));
   if (attn) heroEl.querySelector("#attnbtn").addEventListener("click", () => staleSheet(tree));
 
+  /* Care bar — live vitals, tap to log */
+  const carebar = document.createElement("div");
+  carebar.className = "carebar";
+  for (const def of CARE_DEFS) {
+    const chip = document.createElement("button");
+    chip.className = "cchip";
+    chip.innerHTML = '<span class="ce">' + def.emoji + '</span><span class="cl">' + def.label +
+      '</span><span class="cv">' + agoText(lastCareTime(events, def)) + "</span>";
+    chip.addEventListener("click", () => def.quick ? quickCareSheet(tree, def) : workSheet(tree));
+    carebar.appendChild(chip);
+  }
+  main.appendChild(carebar);
+
   const tabs = document.createElement("div");
   tabs.className = "tabs";
   [["timeline", "Timeline"], ["map", "Map"], ["growth", "Growth"], ["details", "Details"]].forEach(([id, label]) => {
@@ -676,12 +763,80 @@ async function renderTimeline(el, tree, events) {
     el.innerHTML = '<div class="empty"><div class="big">📖</div><div class="h">A blank journal</div><div>Use the + button to log the first photo or note.</div></div>';
     return;
   }
+
+  /* Pinned notes — the "Remember" strip, visible regardless of filter */
+  const pinned = events.filter(e => e.type === "note" && e.pinned);
+  if (pinned.length) {
+    const strip = document.createElement("div");
+    strip.className = "pinstrip";
+    strip.innerHTML = '<div class="ph2">📌 Remember</div>';
+    for (const p of pinned) {
+      const row = document.createElement("div");
+      row.className = "pn";
+      const txt = document.createElement("span");
+      txt.textContent = p.body;
+      const un = document.createElement("button");
+      un.className = "minibtn";
+      un.textContent = "Unpin";
+      un.addEventListener("click", async () => {
+        p.pinned = false;
+        await dbPut("events", p);
+        toast("Unpinned");
+        render();
+      });
+      row.appendChild(txt);
+      row.appendChild(un);
+      strip.appendChild(row);
+    }
+    el.appendChild(strip);
+  }
+
+  /* Filter chips */
+  const FILTERS = [["all", "All"], ["photo", "Photos"], ["note", "Notes"], ["care", "Care"], ["work", "Work"], ["measurement", "Measurements"]];
+  const bar = document.createElement("div");
+  bar.className = "filters";
+  for (const [id, label] of FILTERS) {
+    const c = document.createElement("button");
+    c.className = "fchip" + (state.tlFilter === id ? " active" : "");
+    c.textContent = label;
+    c.addEventListener("click", () => { state.tlFilter = id; render(); });
+    bar.appendChild(c);
+  }
+  el.appendChild(bar);
+
+  if (state.tlFilter !== "all") events = events.filter(e => e.type === state.tlFilter);
+  if (!events.length) {
+    const none = document.createElement("p");
+    none.className = "subtle";
+    none.style.padding = "6px 2px";
+    none.textContent = "Nothing of that type logged yet.";
+    el.appendChild(none);
+    return;
+  }
+
+  /* In the All view, collapse consecutive runs of the same care type
+     so daily watering doesn't drown the journal. The Care filter
+     shows (and lets you delete) every individual entry. */
+  let items = events;
+  if (state.tlFilter === "all") {
+    items = [];
+    for (const e of events) {
+      const prev = items[items.length - 1];
+      if (e.type === "care" && prev && prev.type === "care" && prev.careType === e.careType) {
+        prev._count = (prev._count || 1) + 1;
+        prev._oldest = e.date;
+      } else {
+        items.push(Object.assign({}, e));
+      }
+    }
+  }
+
   const ul = document.createElement("ul");
   ul.className = "tl";
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
+  for (let i = 0; i < items.length; i++) {
+    const e = items[i];
     const li = document.createElement("li");
-    const dotClass = e.type === "work" ? "work" : e.type === "measurement" ? "measure" : e.type === "stage" ? "stage" : "";
+    const dotClass = e.type === "work" ? "work" : e.type === "measurement" ? "measure" : e.type === "stage" ? "stage" : e.type === "care" ? "care" : "";
     let what = "";
     if (e.type === "photo") what = esc(e.body || "Photo added");
     else if (e.type === "note") what = esc(e.body);
@@ -690,9 +845,14 @@ async function renderTimeline(el, tree, events) {
       const m = METRICS.find(m => m.id === e.metric);
       what = "<strong>" + esc(m ? m.name : e.metric) + ":</strong> " + esc(e.value) + " " + (m ? m.unit : "");
     }
+    else if (e.type === "care") {
+      const def = CARE_DEFS.find(d => d.careType === e.careType);
+      what = "<strong>" + (def ? def.emoji + " " : "") + esc(e.careType) + "</strong>" +
+        (e._count ? " ×" + e._count + ' <span class="subtle">since ' + fmtDate(e._oldest) + "</span>" : "");
+    }
     else if (e.type === "stage") what = "<strong>" + esc(e.body) + "</strong> 🎉";
     li.innerHTML =
-      '<div class="rail"><div class="dot ' + dotClass + '"></div>' + (i < events.length - 1 ? '<div class="stem"></div>' : "") + "</div>" +
+      '<div class="rail"><div class="dot ' + dotClass + '"></div>' + (i < items.length - 1 ? '<div class="stem"></div>' : "") + "</div>" +
       '<div class="ev"><div class="when">' + fmtDate(e.date) + "</div>" +
       '<div class="what">' + what + "</div></div>";
     const evBody = li.querySelector(".ev");
@@ -719,27 +879,41 @@ async function renderTimeline(el, tree, events) {
         evBody.appendChild(actions);
       }
     }
-    /* delete control for any event */
-    const actions2 = document.createElement("div");
-    actions2.className = "evactions";
-    const del = document.createElement("button");
-    del.className = "minibtn danger";
-    del.textContent = "Delete";
-    del.addEventListener("click", () => confirmSheet(
-      "Delete this entry?",
-      e.type === "photo" ? "The photo will be removed from " + tree.nickname + "'s history too." : "This can't be undone.",
-      async () => {
-        await dbDelete("events", e.id);
-        if (e.type === "photo" && e.photoId) {
-          await dbDelete("photos", e.photoId);
-          urlCache.delete(e.photoId);
-          if (tree.heroPhotoId === e.photoId) { tree.heroPhotoId = null; await dbPut("trees", tree); }
-        }
-        toast("Entry deleted");
-        render();
-      }));
-    actions2.appendChild(del);
-    evBody.appendChild(actions2);
+    /* pin + delete controls (collapsed care runs manage entries via the Care filter) */
+    if (!e._count) {
+      const actions2 = document.createElement("div");
+      actions2.className = "evactions";
+      if (e.type === "note") {
+        const pin = document.createElement("button");
+        pin.className = "minibtn";
+        pin.textContent = e.pinned ? "📌 Pinned" : "Pin to Remember";
+        pin.addEventListener("click", async () => {
+          e.pinned = !e.pinned;
+          await dbPut("events", e);
+          toast(e.pinned ? "Pinned — it'll sit at the top of the timeline" : "Unpinned");
+          render();
+        });
+        actions2.appendChild(pin);
+      }
+      const del = document.createElement("button");
+      del.className = "minibtn danger";
+      del.textContent = "Delete";
+      del.addEventListener("click", () => confirmSheet(
+        "Delete this entry?",
+        e.type === "photo" ? "The photo will be removed from " + tree.nickname + "'s history too." : "This can't be undone.",
+        async () => {
+          await dbDelete("events", e.id);
+          if (e.type === "photo" && e.photoId) {
+            await dbDelete("photos", e.photoId);
+            urlCache.delete(e.photoId);
+            if (tree.heroPhotoId === e.photoId) { tree.heroPhotoId = null; await dbPut("trees", tree); }
+          }
+          toast("Entry deleted");
+          render();
+        }));
+      actions2.appendChild(del);
+      evBody.appendChild(actions2);
+    }
     ul.appendChild(li);
   }
   el.appendChild(ul);
@@ -749,6 +923,7 @@ async function renderTimeline(el, tree, events) {
 function renderDetails(el, tree) {
   const rows = [
     ["Species", tree.species || "—"],
+    ["Bonsai style", tree.style || "Not styled yet"],
     ["Acquired", fmtDate(tree.acquiredDate)],
     ["Age estimate", ageText(tree) || "—"],
     ["Target caliper", tree.targetCaliper ? tree.targetCaliper + " mm" : "Not set"],
@@ -781,6 +956,8 @@ function editDetailsSheet(tree) {
     "<h2>Edit details</h2>" +
     '<label for="e-nick">Nickname</label><input id="e-nick" maxlength="40" value="' + esc(tree.nickname) + '">' +
     '<label for="e-species">Species</label><input id="e-species" maxlength="60" value="' + esc(tree.species) + '">' +
+    '<label for="e-style">Bonsai style</label><select id="e-style">' +
+    TREE_STYLES.map(s => "<option" + (s === tree.style ? " selected" : "") + ">" + s + "</option>").join("") + "</select>" +
     '<label for="e-acq">Date acquired</label><input id="e-acq" type="date" value="' + esc(tree.acquiredDate || "") + '">' +
     '<label for="e-age">Age when acquired (years)</label><input id="e-age" type="number" min="0" step="0.5" value="' + esc(tree.ageAtAcquisition || 0) + '">' +
     '<label for="e-target">Target trunk caliper (mm)</label><input id="e-target" type="number" min="1" value="' + esc(tree.targetCaliper || "") + '">' +
@@ -798,6 +975,7 @@ function editDetailsSheet(tree) {
         Object.assign(tree, {
           nickname: nick,
           species: el.querySelector("#e-species").value.trim(),
+          style: el.querySelector("#e-style").value,
           acquiredDate: el.querySelector("#e-acq").value,
           ageAtAcquisition: Number(el.querySelector("#e-age").value) || 0,
           targetCaliper: Number(el.querySelector("#e-target").value) || null,
@@ -939,6 +1117,30 @@ function measurementSheet(tree) {
         });
         closeSheet(); toast("Measurement saved"); render();
       });
+    });
+}
+
+/* ---------- Quick care logging (care bar taps) ---------- */
+function quickCareSheet(tree, def) {
+  sheet("<h2>" + def.emoji + " " + def.label + "</h2>" +
+    '<button class="btn" id="qc-now">' + def.label + " just now</button>" +
+    '<label for="qc-date">…or backdate it</label><input id="qc-date" type="date" max="' + todayISO() + '">' +
+    '<button class="btn secondary" id="qc-back">Log for that date</button>' +
+    '<button class="btn secondary" id="qc-cancel">Cancel</button>',
+    (el) => {
+      const save = async (dateISO) => {
+        await dbPut("events", { id: uid(), treeId: tree.id, date: dateISO, type: "care", careType: def.careType });
+        closeSheet();
+        toast(def.emoji + " " + def.label);
+        render();
+      };
+      el.querySelector("#qc-now").addEventListener("click", () => save(new Date().toISOString()));
+      el.querySelector("#qc-back").addEventListener("click", () => {
+        const v = el.querySelector("#qc-date").value;
+        if (!v) { toast("Pick a date first"); return; }
+        save(new Date(v + "T12:00:00").toISOString());
+      });
+      el.querySelector("#qc-cancel").addEventListener("click", closeSheet);
     });
 }
 
