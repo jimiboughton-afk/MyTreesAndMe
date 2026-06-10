@@ -1545,7 +1545,8 @@ function openMapEditor(tree, map, isNew) {
   M = {
     tree, map: JSON.parse(JSON.stringify(map)), isNew: !!isNew, dirty: !!isNew,
     mode: "branch", active: null, selected: null,
-    s: 1, fit: 1, tx: 0, ty: 0, natW: 0, natH: 0, ptrs: new Map(), moved: 0
+    s: 1, fit: 1, tx: 0, ty: 0, natW: 0, natH: 0, ptrs: new Map(), moved: 0,
+    hist: [], histIdx: 0, ptRedo: []
   };
   state.view = "mapedit";
   render();
@@ -1576,6 +1577,7 @@ async function renderMapEditor(main) {
     '<button class="mtool" data-mode="bud">🟡 Bud</button>' +
     '<button class="mtool" data-mode="select">👆 Select</button>' +
     '<button class="mtool" id="m-undo">↩ Undo</button>' +
+    '<button class="mtool" id="m-redo">↪ Redo</button>' +
     '<button class="mtool" id="m-end" style="display:none">✔ End branch</button>' +
     "</div>" +
     '<div id="mapwrap"><div id="mapstage"><img id="m-img" alt="">' +
@@ -1592,6 +1594,32 @@ async function renderMapEditor(main) {
     bud: "Tap to mark buds — they drive pruning predictions later.",
     select: "Tap a branch to label or tag it; tap a bud to remove it."
   };
+
+  /* ----- chronological undo/redo history (all tools share one stack) ----- */
+  function snap() { return JSON.stringify({ branches: M.map.branches, buds: M.map.buds || [] }); }
+  function updateHistBtns() {
+    const u = $("#m-undo"), r = $("#m-redo");
+    if (u) u.style.opacity = (M.active && M.active.points.length) || M.histIdx > 0 ? "1" : ".4";
+    if (r) r.style.opacity = (M.active && M.ptRedo.length) || M.histIdx < M.hist.length - 1 ? "1" : ".4";
+  }
+  function pushHist() {
+    M.hist = M.hist.slice(0, M.histIdx + 1);
+    M.hist.push(snap());
+    M.histIdx = M.hist.length - 1;
+    M.dirty = true;
+    updateHistBtns();
+  }
+  function restoreHist(i) {
+    const s = JSON.parse(M.hist[i]);
+    M.map.branches = s.branches;
+    M.map.buds = s.buds;
+    M.histIdx = i;
+    M.dirty = true;
+    M.selected = null;
+    renderBranchPanel();
+    redraw();
+    updateHistBtns();
+  }
 
   function redraw() {
     let out = "";
@@ -1635,14 +1663,18 @@ async function renderMapEditor(main) {
     if (!M.active) return;
     if (M.active.points.length >= 2) {
       M.map.branches.push(M.active);
-      M.dirty = true;
+      M.active = null;
+      M.ptRedo = [];
+      pushHist();
       hint((M.map.branches.length === 1 ? "Trunk" : "Branch") + " saved — " + M.map.branches.length + " traced.");
     } else {
       hint("Branch discarded — it needs at least two points.");
+      M.active = null;
+      M.ptRedo = [];
     }
-    M.active = null;
     $("#m-end").style.display = "none";
     redraw();
+    updateHistBtns();
   }
 
   function setMode(mode) {
@@ -1668,29 +1700,33 @@ async function renderMapEditor(main) {
       if (!M.active) {
         if (!M.map.branches.length) {
           M.active = { id: uid(), parentId: null, points: [p], state: "develop", label: "Trunk" };
+          M.ptRedo = [];
           hint("Trunk started — keep tapping up the trunk line, then ✔ End branch.");
         } else {
           const near = nearestOnBranches(p, 32 / M.s);
           if (!near) { hint("Start a branch by tapping ON the trunk or a parent branch."); return; }
           M.active = { id: uid(), parentId: near.branchId, points: [near.pt], state: "develop", label: "" };
+          M.ptRedo = [];
           hint("Branch started — tap along it, then ✔ End branch.");
         }
         $("#m-end").style.display = "";
       } else {
         M.active.points.push(p);
+        M.ptRedo = [];
       }
       redraw();
+      updateHistBtns();
     } else if (M.mode === "bud") {
       M.map.buds = M.map.buds || [];
       M.map.buds.push({ id: uid(), x: p.x, y: p.y });
-      M.dirty = true;
+      pushHist();
       redraw();
     } else if (M.mode === "select") {
       const buds = M.map.buds || [];
       for (let i = buds.length - 1; i >= 0; i--) {
         if (Math.hypot(p.x - buds[i].x, p.y - buds[i].y) < 24 / M.s) {
           buds.splice(i, 1);
-          M.dirty = true;
+          pushHist();
           hint("Bud removed.");
           redraw();
           return;
@@ -1718,9 +1754,10 @@ async function renderMapEditor(main) {
       '<button class="minibtn danger" id="b-del">Delete branch</button>' +
       '<button class="minibtn" id="b-done">Done</button></div></div>';
     panel.querySelector("#b-label").addEventListener("input", (ev) => { b.label = ev.target.value; M.dirty = true; });
+    panel.querySelector("#b-label").addEventListener("change", () => pushHist());
     panel.querySelectorAll("[data-state]").forEach(c => c.addEventListener("click", () => {
       b.state = c.getAttribute("data-state");
-      M.dirty = true;
+      pushHist();
       renderBranchPanel();
       redraw();
     }));
@@ -1728,7 +1765,7 @@ async function renderMapEditor(main) {
       if (M.map.branches.some(x => x.parentId === b.id)) { toast("Delete its child branches first"); return; }
       M.map.branches = M.map.branches.filter(x => x.id !== b.id);
       M.selected = null;
-      M.dirty = true;
+      pushHist();
       renderBranchPanel();
       redraw();
     });
@@ -1781,19 +1818,25 @@ async function renderMapEditor(main) {
     b.addEventListener("click", () => setMode(b.getAttribute("data-mode"))));
   $("#m-end").addEventListener("click", commitActive);
   $("#m-undo").addEventListener("click", () => {
-    if (M.active) {
-      M.active.points.pop();
+    if (M.active && M.active.points.length) {
+      M.ptRedo.push(M.active.points.pop());
       if (!M.active.points.length) { M.active = null; $("#m-end").style.display = "none"; hint(modeHints.branch); }
       redraw();
+      updateHistBtns();
       return;
     }
-    const last = M.map.branches[M.map.branches.length - 1];
-    if (!last) { hint("Nothing to undo."); return; }
-    if (M.map.branches.some(x => x.parentId === last.id)) { toast("That branch has children — delete those first (Select mode)"); return; }
-    M.map.branches.pop();
-    M.dirty = true;
-    redraw();
-    hint("Removed last branch.");
+    if (M.histIdx > 0) { restoreHist(M.histIdx - 1); hint("Undone."); }
+    else hint("Nothing to undo.");
+  });
+  $("#m-redo").addEventListener("click", () => {
+    if (M.active && M.ptRedo.length) {
+      M.active.points.push(M.ptRedo.pop());
+      redraw();
+      updateHistBtns();
+      return;
+    }
+    if (M.histIdx < M.hist.length - 1) { restoreHist(M.histIdx + 1); hint("Redone."); }
+    else hint("Nothing to redo.");
   });
   $("#m-save").addEventListener("click", async () => {
     if (M.active) commitActive();
@@ -1828,7 +1871,11 @@ async function renderMapEditor(main) {
     redraw();
   };
   img.src = photoURL(photo);
+  M.hist = [snap()];
+  M.histIdx = 0;
+  M.ptRedo = [];
   setMode(M.mode);
+  updateHistBtns();
 }
 
 /* ============================================================
