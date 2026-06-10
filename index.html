@@ -93,7 +93,7 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
 .subtle { color: var(--ink-soft); font-size: 13.5px; }
 
 /* ---------- Collection ---------- */
-#cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.cardgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .card {
   background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow);
   overflow: hidden; text-align: left; position: relative; display: flex; flex-direction: column;
@@ -121,7 +121,39 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
 .empty .big { font-size: 46px; margin-bottom: 12px; }
 .empty .h { font-size: 17px; font-weight: 650; color: var(--ink); margin-bottom: 6px; }
 
+/* ---------- Collection: organise row, groups, fun layer ---------- */
+.collectorline { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 650; color: var(--bark); margin: 2px 2px 10px; }
+.orgrow { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; flex-wrap: wrap; }
+.orgbtn { font-size: 13px; font-weight: 650; padding: 8px 14px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); }
+.orgbtn:active { background: var(--green-soft); }
+.orgsum { font-size: 12px; color: var(--ink-soft); flex: 1; min-width: 0; }
+.grouph { font-size: 12.5px; font-weight: 700; color: var(--bark); letter-spacing: .04em; text-transform: uppercase; margin: 18px 2px 8px; display: flex; justify-content: space-between; align-items: baseline; }
+.grouph span:last-child { font-weight: 600; color: var(--ink-soft); }
+.cardgrid + .grouph { margin-top: 22px; }
+/* Foil finishes */
+.card.holo, .card.gold { border: 2px solid transparent; background-origin: border-box; background-clip: padding-box, border-box; }
+.card.holo { background-image: linear-gradient(var(--surface), var(--surface)), linear-gradient(115deg, #9fd4ff, #e0b3ff, #ffe39a, #a9f0c2, #9fd4ff); background-size: 100% 100%, 320% 320%; animation: shimmer 7s linear infinite; }
+.card.gold { background-image: linear-gradient(var(--surface), var(--surface)), linear-gradient(115deg, #f0cf78, #fff3c4, #d9a73e, #fff3c4, #f0cf78); background-size: 100% 100%, 320% 320%; animation: shimmer 5s linear infinite; }
+@keyframes shimmer { from { background-position: 0 0, 0% 50%; } to { background-position: 0 0, 320% 50%; } }
+/* Tree of the day */
+.card.totd { box-shadow: 0 0 0 2px var(--amber), var(--shadow); }
+.totd-ribbon { position: absolute; top: 8px; left: 8px; background: var(--amber); color: #fff; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; box-shadow: var(--shadow); }
+/* Pack-opening reveal */
+#reveal { position: fixed; inset: 0; z-index: 80; background: rgba(20,24,18,.8); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
+.flipwrap { perspective: 1100px; width: min(64vw, 250px); }
+.flipinner { position: relative; width: 100%; aspect-ratio: 1 / 1.45; transform-style: preserve-3d; transition: transform .9s cubic-bezier(.2,.7,.25,1); }
+.flipinner.flipped { transform: rotateY(180deg); }
+.face { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; border-radius: 16px; box-shadow: 0 12px 44px rgba(0,0,0,.45); overflow: hidden; }
+.face.back { background: var(--green); display: flex; align-items: center; justify-content: center; font-size: 56px; border: 5px solid #243A2B; }
+.face.front { background: var(--surface); transform: rotateY(180deg); display: flex; flex-direction: column; }
+#reveal .hint { color: #F4F1E6; font-size: 14px; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) {
+  .card.holo, .card.gold { animation: none; }
+  .flipinner { transition: none; }
+}
+
 /* ---------- FAB ---------- */
+
 #fab {
   position: fixed; right: 18px; bottom: calc(env(safe-area-inset-bottom) + 20px); z-index: 30;
   width: 60px; height: 60px; border-radius: 50%; background: var(--green); color: #F4F1E6;
@@ -351,6 +383,53 @@ function agoText(ts) {
   if (d < 60) return Math.round(d / 7) + "wk";
   if (d < 365) return Math.round(d / 30.4) + "mo";
   return (Math.round(d / 36.5) / 10) + "yr";
+}
+
+/* ---------- Collection extras: organising + fun layer ---------- */
+const AGE_BANDS = ["0–2 yrs", "3–5 yrs", "6–10 yrs", "10+ yrs"];
+function ageYears(tree) {
+  const owned = tree.acquiredDate ? (Date.now() - new Date(tree.acquiredDate).getTime()) / 3.156e10 : 0;
+  return owned + (Number(tree.ageAtAcquisition) || 0);
+}
+function ageBand(tree) {
+  const y = ageYears(tree);
+  return y < 3 ? AGE_BANDS[0] : y < 6 ? AGE_BANDS[1] : y < 11 ? AGE_BANDS[2] : AGE_BANDS[3];
+}
+function collectorTitle(trees) {
+  let maxYears = 0;
+  for (const t of trees) if (t.acquiredDate) {
+    maxYears = Math.max(maxYears, (Date.now() - new Date(t.acquiredDate).getTime()) / 3.156e10);
+  }
+  const score = trees.length + Math.floor(maxYears) * 2;
+  if (score >= 20) return "Forest Elder";
+  if (score >= 13) return "Grove Warden";
+  if (score >= 7) return "Grove Tender";
+  if (score >= 3) return "Sapling Keeper";
+  return "Seed Sower";
+}
+function treeOfTheDayId(trees) {
+  if (trees.length < 2) return null;
+  const seed = new Date().toISOString().slice(0, 10);
+  let h = 0;
+  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const sorted = [...trees].sort((a, b) => (a.id < b.id ? -1 : 1));
+  return sorted[h % sorted.length].id;
+}
+function bdayActive(tree) {
+  if (!tree.acquiredDate) return false;
+  const now = new Date();
+  const acq = new Date(tree.acquiredDate);
+  if (now.getFullYear() <= acq.getFullYear()) return false;
+  const anniv = new Date(now.getFullYear(), acq.getMonth(), acq.getDate());
+  const diff = now - anniv;
+  return diff >= 0 && diff < 7 * 864e5;
+}
+/* Foil placeholder until Phase 6 species difficulty ratings */
+const HOLO_SPECIES = /banksia|eucalypt|corymbia|casuarina|allocasuarina|melaleuca|leptospermum|kunzea|pinus|\bpine\b|juniper/i;
+function cardFinish(tree) {
+  if (tree.stage === "exhibition") return "gold";
+  if (HOLO_SPECIES.test(tree.species || "")) return "holo";
+  return "";
 }
 
 /* ============================================================
@@ -593,22 +672,105 @@ async function renderCollection(main) {
       "<div>Add your first tree with the + button.<br>Every photo, cut and note from today<br>becomes its history.</div></div>";
     return;
   }
-  /* Sort: most recent activity first */
   const allEvents = await dbAll("events");
-  const lastActivity = {};
+  const org = Object.assign(
+    { groupBy: "none", sort: "activity", stages: [], species: [], styles: [], attnOnly: false },
+    await getSetting("organise", {}));
+
+  /* Precompute per-tree events, attention, and last activity */
+  const evByTree = {}, attnByTree = {}, lastActivity = {};
+  for (const t of trees) evByTree[t.id] = [];
   for (const e of allEvents) {
-    const t = new Date(e.date).getTime();
-    if (!lastActivity[e.treeId] || t > lastActivity[e.treeId]) lastActivity[e.treeId] = t;
+    if (!evByTree[e.treeId]) continue;
+    evByTree[e.treeId].push(e);
+    const ts = new Date(e.date).getTime();
+    if (!lastActivity[e.treeId] || ts > lastActivity[e.treeId]) lastActivity[e.treeId] = ts;
   }
-  trees.sort((a, b) => (lastActivity[b.id] || 0) - (lastActivity[a.id] || 0));
+  for (const t of trees) attnByTree[t.id] = await attentionInfo(t, evByTree[t.id]);
 
-  const grid = document.createElement("div");
-  grid.id = "cards";
-  main.appendChild(grid);
+  /* Collector title */
+  main.insertAdjacentHTML("beforeend",
+    '<div class="collectorline">🏅 ' + collectorTitle(trees) + " · " + trees.length +
+    " tree" + (trees.length === 1 ? "" : "s") + "</div>");
 
-  for (const tree of trees) {
-    const events = allEvents.filter(e => e.treeId === tree.id);
-    const attn = await attentionInfo(tree, events);
+  /* Organise row */
+  const activeBits = [];
+  if (org.groupBy !== "none") activeBits.push("grouped by " + org.groupBy);
+  if (org.sort !== "activity") activeBits.push("sorted by " + ({ name: "name", oldest: "oldest", youngest: "youngest" }[org.sort] || org.sort));
+  if (org.stages.length || org.species.length || org.styles.length || org.attnOnly) activeBits.push("filtered");
+  const row = document.createElement("div");
+  row.className = "orgrow";
+  row.innerHTML = '<button class="orgbtn" id="orgbtn">⚙︎ Organise</button>' +
+    '<span class="orgsum">' + esc(activeBits.join(" · ")) + "</span>" +
+    (activeBits.length ? '<button class="minibtn" id="orgclear">Clear</button>' : "");
+  main.appendChild(row);
+  row.querySelector("#orgbtn").addEventListener("click", () => organiseSheet(trees, org));
+  if (activeBits.length) row.querySelector("#orgclear").addEventListener("click", async () => {
+    await setSetting("organise", { groupBy: "none", sort: "activity", stages: [], species: [], styles: [], attnOnly: false });
+    render();
+  });
+
+  /* Filter */
+  let shown = trees.filter(t =>
+    (!org.stages.length || org.stages.includes(t.stage)) &&
+    (!org.species.length || org.species.includes(t.species || "Species unknown")) &&
+    (!org.styles.length || org.styles.includes((t.style && t.style !== "Not styled yet") ? t.style : "Not styled yet")) &&
+    (!org.attnOnly || attnByTree[t.id]));
+
+  /* Sort */
+  if (org.sort === "name") shown.sort((a, b) => a.nickname.localeCompare(b.nickname));
+  else if (org.sort === "oldest") shown.sort((a, b) => ageYears(b) - ageYears(a));
+  else if (org.sort === "youngest") shown.sort((a, b) => ageYears(a) - ageYears(b));
+  else shown.sort((a, b) => (lastActivity[b.id] || 0) - (lastActivity[a.id] || 0));
+
+  if (!shown.length) {
+    main.insertAdjacentHTML("beforeend",
+      '<div class="empty"><div class="big">🔍</div><div class="h">No trees match</div><div>Loosen the filters in Organise.</div></div>');
+    return;
+  }
+
+  const totd = treeOfTheDayId(trees);
+
+  /* Group */
+  let groups;
+  if (org.groupBy === "none") groups = [[null, shown]];
+  else {
+    const keyOf = t =>
+      org.groupBy === "species" ? (t.species || "Species unknown") :
+      org.groupBy === "stage" ? stageOf(t).emoji + " " + stageOf(t).name :
+      org.groupBy === "style" ? ((t.style && t.style !== "Not styled yet") ? t.style.replace(/\s*\(.*\)$/, "") : "Not styled yet") :
+      ageBand(t);
+    const map = new Map();
+    for (const t of shown) {
+      const k = keyOf(t);
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(t);
+    }
+    groups = [...map.entries()];
+    if (org.groupBy === "stage") {
+      const order = STAGES.map(s => s.emoji + " " + s.name);
+      groups.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+    } else if (org.groupBy === "age") {
+      groups.sort((a, b) => AGE_BANDS.indexOf(a[0]) - AGE_BANDS.indexOf(b[0]));
+    } else {
+      groups.sort((a, b) => a[0].localeCompare(b[0]));
+    }
+  }
+
+  for (const [label, list] of groups) {
+    if (label) main.insertAdjacentHTML("beforeend",
+      '<div class="grouph"><span>' + esc(label) + "</span><span>" + list.length + "</span></div>");
+    const grid = document.createElement("div");
+    grid.className = "cardgrid";
+    main.appendChild(grid);
+    for (const tree of list) {
+      grid.appendChild(await makeCard(tree, evByTree[tree.id], attnByTree[tree.id], totd));
+    }
+  }
+}
+
+/* ---------- A single collection card ---------- */
+async function makeCard(tree, events, attn, totd) {
     const stage = stageOf(tree);
     const hero = tree.heroPhotoId ? await dbGet("photos", tree.heroPhotoId) : null;
     const styleShort = tree.style && tree.style !== "Not styled yet" ? tree.style.replace(/\s*\(.*\)$/, "") : null;
@@ -617,11 +779,13 @@ async function renderCollection(main) {
       return "<span>" + def.emoji + " " + agoText(lastCareTime(events, def)) + "</span>";
     }).join("");
     const btn = document.createElement("button");
-    btn.className = "card";
+    const finish = cardFinish(tree);
+    btn.className = "card" + (finish ? " " + finish : "") + (tree.id === totd ? " totd" : "");
     btn.innerHTML =
       (hero ? '<img class="ph" alt="" src="' + photoURL(hero) + '">' : '<div class="noph">🌳</div>') +
+      (tree.id === totd ? '<span class="totd-ribbon">🌞 Tree of the day</span>' : "") +
       (attn ? '<span class="attn" title="' + esc(attn.reason) + '">!</span>' : "") +
-      '<div class="body"><div class="nick">' + esc(tree.nickname) + "</div>" +
+      '<div class="body"><div class="nick">' + esc(tree.nickname) + (bdayActive(tree) ? " 🎂" : "") + "</div>" +
       '<div class="sp">' + esc(tree.species || "Species unknown") + "</div>" +
       '<div class="stats">' +
       '<div class="srow"><span class="sk">' + stage.emoji + " " + stage.name + "</span><span>" + esc(ageText(tree) || "age —") + "</span></div>" +
@@ -629,8 +793,7 @@ async function renderCollection(main) {
       '<div class="srow care">' + careHTML + "</div>" +
       "</div></div>";
     btn.addEventListener("click", () => go("profile", tree.id));
-    grid.appendChild(btn);
-  }
+    return btn;
 }
 
 /* ---------- Add tree (FAB on collection) ---------- */
@@ -677,11 +840,96 @@ function addTreeSheet() {
           type: "note", body: "Joined the collection 🌱"
         });
         closeSheet();
-        toast(tree.nickname + " added");
-        go("profile", tree.id);
+        packReveal(tree);
       });
     }
   );
+}
+
+/* ---------- Organise sheet (group / sort / filter, persisted) ---------- */
+function organiseSheet(trees, org) {
+  const speciesList = [...new Set(trees.map(t => t.species || "Species unknown"))].sort();
+  const styleList = [...new Set(trees.map(t => (t.style && t.style !== "Not styled yet") ? t.style : "Not styled yet"))].sort();
+  const opt = (v, l, cur) => '<option value="' + v + '"' + (cur === v ? " selected" : "") + ">" + l + "</option>";
+  sheet("<h2>Organise the collection</h2>" +
+    '<label for="o-group">Group by</label><select id="o-group">' +
+    opt("none", "None", org.groupBy) + opt("species", "Species", org.groupBy) +
+    opt("stage", "Stage", org.groupBy) + opt("style", "Style", org.groupBy) +
+    opt("age", "Age band", org.groupBy) + "</select>" +
+    '<label for="o-sort">Sort</label><select id="o-sort">' +
+    opt("activity", "Recent activity", org.sort) + opt("name", "Name", org.sort) +
+    opt("oldest", "Oldest in training", org.sort) + opt("youngest", "Youngest first", org.sort) + "</select>" +
+    '<label style="margin-top:18px">Filters <span class="subtle" style="font-weight:400">— nothing ticked in a section means show all</span></label>' +
+    '<label class="checkrow"><input type="checkbox" id="o-attn"' + (org.attnOnly ? " checked" : "") + "><span>Needs attention only</span></label>" +
+    "<label>Stages</label>" +
+    STAGES.map(s => '<label class="checkrow"><input type="checkbox" data-stage="' + s.id + '"' +
+      (org.stages.includes(s.id) ? " checked" : "") + "><span>" + s.emoji + " " + s.name + "</span></label>").join("") +
+    "<label>Species</label>" +
+    speciesList.map(sp => '<label class="checkrow"><input type="checkbox" data-species="' + esc(sp) + '"' +
+      (org.species.includes(sp) ? " checked" : "") + "><span>" + esc(sp) + "</span></label>").join("") +
+    "<label>Styles</label>" +
+    styleList.map(st => '<label class="checkrow"><input type="checkbox" data-style="' + esc(st) + '"' +
+      (org.styles.includes(st) ? " checked" : "") + "><span>" + esc(st) + "</span></label>").join("") +
+    '<button class="btn" id="o-apply">Apply</button>' +
+    '<button class="btn secondary" id="o-cancel">Cancel</button>',
+    (el) => {
+      el.querySelector("#o-cancel").addEventListener("click", closeSheet);
+      el.querySelector("#o-apply").addEventListener("click", async () => {
+        const grab = (attr) => [...el.querySelectorAll("[data-" + attr + "]")]
+          .filter(c => c.checked).map(c => c.getAttribute("data-" + attr));
+        await setSetting("organise", {
+          groupBy: el.querySelector("#o-group").value,
+          sort: el.querySelector("#o-sort").value,
+          attnOnly: el.querySelector("#o-attn").checked,
+          stages: grab("stage"),
+          species: grab("species"),
+          styles: grab("style")
+        });
+        closeSheet();
+        render();
+      });
+    });
+}
+
+/* ---------- Pack-opening reveal for new trees ---------- */
+function packReveal(tree) {
+  const stage = stageOf(tree);
+  const wrap = document.createElement("div");
+  wrap.id = "reveal";
+  wrap.innerHTML =
+    '<div class="flipwrap"><div class="flipinner">' +
+    '<div class="face back">🌿</div>' +
+    '<div class="face front">' +
+    '<div style="flex:1;display:flex;align-items:center;justify-content:center;font-size:56px;background:var(--bg-sunken)">🌳</div>' +
+    '<div style="padding:11px 13px"><div style="font-weight:700;font-size:16px">' + esc(tree.nickname) + "</div>" +
+    '<div style="font-style:italic;color:var(--ink-soft);font-size:12px">' + esc(tree.species || "Species unknown") + "</div>" +
+    '<div style="margin-top:7px;font-size:12px;font-weight:650;color:var(--green)">' + stage.emoji + " " + stage.name + "</div></div>" +
+    "</div></div></div>" +
+    '<div class="hint">A new tree joins the collection — tap to continue</div>';
+  document.body.appendChild(wrap);
+  setTimeout(() => wrap.querySelector(".flipinner").classList.add("flipped"), 380);
+  wrap.addEventListener("click", () => { wrap.remove(); go("profile", tree.id); });
+}
+
+/* ---------- Tree birthdays (auto timeline entries) ---------- */
+async function checkBirthdays() {
+  const trees = await dbAll("trees");
+  const now = new Date();
+  for (const t of trees) {
+    if (!t.acquiredDate) continue;
+    const acq = new Date(t.acquiredDate);
+    const years = now.getFullYear() - acq.getFullYear();
+    if (years < 1) continue;
+    const anniv = new Date(now.getFullYear(), acq.getMonth(), acq.getDate());
+    if (anniv > now) continue;
+    const evs = await dbAll("events", "treeId", t.id);
+    if (evs.some(e => e.type === "bday" && e.year === now.getFullYear())) continue;
+    await dbPut("events", {
+      id: uid(), treeId: t.id, date: anniv.toISOString(), type: "bday",
+      year: now.getFullYear(),
+      body: years + " year" + (years === 1 ? "" : "s") + " together"
+    });
+  }
 }
 
 /* ============================================================
@@ -850,6 +1098,7 @@ async function renderTimeline(el, tree, events) {
       what = "<strong>" + (def ? def.emoji + " " : "") + esc(e.careType) + "</strong>" +
         (e._count ? " ×" + e._count + ' <span class="subtle">since ' + fmtDate(e._oldest) + "</span>" : "");
     }
+    else if (e.type === "bday") what = "<strong>🎂 " + esc(e.body) + "</strong>";
     else if (e.type === "stage") what = "<strong>" + esc(e.body) + "</strong> 🎉";
     li.innerHTML =
       '<div class="rail"><div class="dot ' + dotClass + '"></div>' + (i < items.length - 1 ? '<div class="stem"></div>' : "") + "</div>" +
@@ -1423,6 +1672,7 @@ document.getElementById("fab").addEventListener("click", async () => {
       "or host it (free, e.g. GitHub Pages) for the full app experience.</div></div>";
     return;
   }
+  await checkBirthdays();
   await render();
   backupNag();
 })();
