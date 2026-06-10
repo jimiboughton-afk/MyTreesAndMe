@@ -1115,7 +1115,8 @@ async function renderTimeline(el, tree, events) {
     else if (e.type === "work") what = "<strong>" + esc(e.workType || "Work") + "</strong>" + (e.body ? " — " + esc(e.body) : "");
     else if (e.type === "measurement") {
       const m = METRICS.find(m => m.id === e.metric);
-      what = "<strong>" + esc(m ? m.name : e.metric) + ":</strong> " + esc(e.value) + " " + (m ? m.unit : "");
+      what = "<strong>" + esc(m ? m.name : e.metric) + ":</strong> " + esc(e.value) + " " + (m ? m.unit : "") +
+        (e.source === "map" ? ' <span class="subtle">· from map</span>' : "");
     }
     else if (e.type === "care") {
       const def = CARE_DEFS.find(d => d.careType === e.careType);
@@ -1576,6 +1577,8 @@ async function renderMapEditor(main) {
     '<button class="mtool" data-mode="branch">🌿 Branch</button>' +
     '<button class="mtool" data-mode="bud">🟡 Bud</button>' +
     '<button class="mtool" data-mode="select">👆 Select</button>' +
+    '<button class="mtool" data-mode="cal">📏 Calibrate</button>' +
+    '<button class="mtool" id="m-work">🪚 Work</button>' +
     '<button class="mtool" id="m-undo">↩ Undo</button>' +
     '<button class="mtool" id="m-redo">↪ Redo</button>' +
     '<button class="mtool" id="m-end" style="display:none">✔ End branch</button>' +
@@ -1592,11 +1595,15 @@ async function renderMapEditor(main) {
     pan: "Drag to move, pinch to zoom.",
     branch: M.map.branches.length ? "Tap an existing branch to start a new one growing from it." : "Tap the base of the trunk to start tracing.",
     bud: "Tap to mark buds — they drive pruning predictions later.",
-    select: "Tap a branch to label or tag it; tap a bud to remove it."
+    select: "Tap a branch to label or tag it; tap a bud to remove it.",
+    cal: "Tap BOTH ends of something with a known width — the pot rim is perfect — then enter its real size."
   };
 
   /* ----- chronological undo/redo history (all tools share one stack) ----- */
-  function snap() { return JSON.stringify({ branches: M.map.branches, buds: M.map.buds || [] }); }
+  function snap() {
+    return JSON.stringify({ branches: M.map.branches, buds: M.map.buds || [],
+      calibration: M.map.calibration || null, calPts: M.map.calPts || [] });
+  }
   function updateHistBtns() {
     const u = $("#m-undo"), r = $("#m-redo");
     if (u) u.style.opacity = (M.active && M.active.points.length) || M.histIdx > 0 ? "1" : ".4";
@@ -1613,6 +1620,8 @@ async function renderMapEditor(main) {
     const s = JSON.parse(M.hist[i]);
     M.map.branches = s.branches;
     M.map.buds = s.buds;
+    M.map.calibration = s.calibration;
+    M.map.calPts = s.calPts;
     M.histIdx = i;
     M.dirty = true;
     M.selected = null;
@@ -1625,7 +1634,7 @@ async function renderMapEditor(main) {
     let out = "";
     for (const b of M.map.branches) {
       const pts = b.points.map(p => p.x + "," + p.y).join(" ");
-      const w = b.parentId ? 5 : 9;
+      const w = b.thickness || (b.parentId ? 5 : 9);
       if (b.id === M.selected) out += '<polyline points="' + pts + '" fill="none" stroke="#FFFFFF" stroke-width="' + (w + 5) + '" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>';
       out += '<polyline points="' + pts + '" fill="none" stroke="' + (STATE_COLORS[b.state] || STATE_COLORS.develop) + '" stroke-width="' + w + '" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>';
     }
@@ -1637,6 +1646,9 @@ async function renderMapEditor(main) {
     for (const bud of (M.map.buds || [])) {
       out += '<circle cx="' + bud.x + '" cy="' + bud.y + '" r="8" fill="#F2C744" stroke="#FFFFFF" stroke-width="3"/>';
     }
+    const cp = M.map.calPts || [];
+    if (cp.length === 2) out += '<line x1="' + cp[0].x + '" y1="' + cp[0].y + '" x2="' + cp[1].x + '" y2="' + cp[1].y + '" stroke="#56C1E8" stroke-width="4" stroke-dasharray="12 8"/>';
+    for (const p of cp) out += '<circle cx="' + p.x + '" cy="' + p.y + '" r="7" fill="#56C1E8" stroke="#FFFFFF" stroke-width="2.5"/>';
     svg.innerHTML = out;
   }
 
@@ -1721,6 +1733,12 @@ async function renderMapEditor(main) {
       M.map.buds.push({ id: uid(), x: p.x, y: p.y });
       pushHist();
       redraw();
+    } else if (M.mode === "cal") {
+      M.map.calPts = (M.map.calPts && M.map.calPts.length < 2) ? M.map.calPts : [];
+      M.map.calPts.push(p);
+      M.dirty = true;
+      if (M.map.calPts.length === 2) calibrateSheet();
+      redraw();
     } else if (M.mode === "select") {
       const buds = M.map.buds || [];
       for (let i = buds.length - 1; i >= 0; i--) {
@@ -1747,6 +1765,8 @@ async function renderMapEditor(main) {
     panel.innerHTML = '<div class="bpanel"><h4>' + (b.parentId ? "Branch" : "Trunk") + "</h4>" +
       '<label for="b-label" style="margin-top:8px">Label</label>' +
       '<input id="b-label" maxlength="40" placeholder="e.g. First branch left, sacrifice leader" value="' + esc(b.label || "") + '">' +
+      '<label style="margin-top:10px">Thickness <span class="subtle" id="b-thick-val"></span></label>' +
+      '<input id="b-thick" type="range" min="2" max="90" step="1" value="' + (b.thickness || (b.parentId ? 5 : 9)) + '">' +
       '<div class="statechips">' + BRANCH_STATES.map(([id, name]) =>
         '<button class="schip' + (b.state === id ? " active" : "") + '" data-state="' + id + '"' +
         (b.state === id ? ' style="background:' + STATE_COLORS[id] + '"' : "") + ">" + name + "</button>").join("") + "</div>" +
@@ -1755,6 +1775,19 @@ async function renderMapEditor(main) {
       '<button class="minibtn" id="b-done">Done</button></div></div>';
     panel.querySelector("#b-label").addEventListener("input", (ev) => { b.label = ev.target.value; M.dirty = true; });
     panel.querySelector("#b-label").addEventListener("change", () => pushHist());
+    const thickVal = () => {
+      const px = b.thickness || (b.parentId ? 5 : 9);
+      const mm = M.map.calibration && M.map.calibration.mmPerPx ? " ≈ " + (px * M.map.calibration.mmPerPx).toFixed(1) + " mm" : " (calibrate for mm)";
+      panel.querySelector("#b-thick-val").textContent = px + " px" + mm;
+    };
+    thickVal();
+    panel.querySelector("#b-thick").addEventListener("input", (ev) => {
+      b.thickness = Number(ev.target.value);
+      M.dirty = true;
+      thickVal();
+      redraw();
+    });
+    panel.querySelector("#b-thick").addEventListener("change", () => pushHist());
     panel.querySelectorAll("[data-state]").forEach(c => c.addEventListener("click", () => {
       b.state = c.getAttribute("data-state");
       pushHist();
@@ -1770,6 +1803,73 @@ async function renderMapEditor(main) {
       redraw();
     });
     panel.querySelector("#b-done").addEventListener("click", () => { M.selected = null; renderBranchPanel(); redraw(); });
+  }
+
+  /* ----- calibration ----- */
+  function calibrateSheet() {
+    const [pa, pb] = M.map.calPts;
+    const px = Math.hypot(pb.x - pa.x, pb.y - pa.y);
+    sheet("<h2>📏 Set the scale</h2>" +
+      '<p class="subtle">How long is that line in real life? Pot rim width is the classic ruler.</p>' +
+      '<label for="cal-mm">Real distance (mm)</label><input id="cal-mm" type="number" min="1" inputmode="decimal" placeholder="e.g. 240">' +
+      '<button class="btn" id="cal-save">Set scale</button>' +
+      '<button class="btn secondary" id="cal-cancel">Cancel</button>',
+      (el) => {
+        el.querySelector("#cal-cancel").addEventListener("click", () => {
+          M.map.calPts = [];
+          closeSheet();
+          redraw();
+        });
+        el.querySelector("#cal-save").addEventListener("click", () => {
+          const mm = Number(el.querySelector("#cal-mm").value);
+          if (!mm) { toast("Enter the distance in mm"); return; }
+          M.map.calibration = { mmPerPx: mm / px };
+          pushHist();
+          closeSheet();
+          hint("Scale set — thicknesses and measurements now read in real mm.");
+          redraw();
+        });
+      });
+  }
+
+  /* ----- work mode: bench checklist from tagged branches ----- */
+  function removeCascade(id) {
+    const kids = M.map.branches.filter(b => b.parentId === id);
+    for (const k of kids) removeCascade(k.id);
+    M.map.branches = M.map.branches.filter(b => b.id !== id);
+  }
+  function workModeSheet(actionable) {
+    sheet("<h2>🪚 Work mode</h2>" +
+      '<p class="subtle">Tick each job as you do it at the bench, then log. Logged removals come off the map (children too); shortened branches reset to Develop.</p>' +
+      actionable.map(b => '<label class="checkrow"><input type="checkbox" data-job="' + b.id + '"><span><strong>' +
+        ({ shorten: "Shorten", remove: "Remove", wired: "Check wire" })[b.state] + "</strong> — " +
+        esc(b.label || "unnamed branch") + "</span></label>").join("") +
+      '<button class="btn" id="wm-log">Log ticked work</button>' +
+      '<button class="btn secondary" id="wm-cancel">Cancel</button>',
+      (el) => {
+        el.querySelector("#wm-cancel").addEventListener("click", closeSheet);
+        el.querySelector("#wm-log").addEventListener("click", async () => {
+          const ids = [...el.querySelectorAll("[data-job]")].filter(c => c.checked).map(c => c.getAttribute("data-job"));
+          if (!ids.length) { toast("Nothing ticked yet"); return; }
+          for (const id of ids) {
+            const b = M.map.branches.find(x => x.id === id);
+            if (!b) continue;
+            const verb = b.state === "remove" ? "Removed" : b.state === "shorten" ? "Shortened" : "Checked wire on";
+            await dbPut("events", {
+              id: uid(), treeId: M.tree.id, date: new Date().toISOString(), type: "work",
+              workType: b.state === "wired" ? "Wire" : "Prune",
+              body: verb + " " + (b.label ? "'" + b.label + "'" : "a branch") + " — map v" + M.map.version
+            });
+            if (b.state === "remove") removeCascade(b.id);
+            else if (b.state === "shorten") b.state = "develop";
+          }
+          pushHist();
+          await dbPut("maps", M.map);
+          closeSheet();
+          toast("Work logged to the timeline 🪚");
+          redraw();
+        });
+      });
   }
 
   /* ----- pointer gestures: one-finger pan, pinch zoom, tap = tool ----- */
@@ -1817,6 +1917,11 @@ async function renderMapEditor(main) {
   main.querySelectorAll("[data-mode]").forEach(b =>
     b.addEventListener("click", () => setMode(b.getAttribute("data-mode"))));
   $("#m-end").addEventListener("click", commitActive);
+  $("#m-work").addEventListener("click", () => {
+    const actionable = M.map.branches.filter(b => ["shorten", "remove", "wired"].includes(b.state));
+    if (!actionable.length) { toast("Tag branches Shorten / Remove / Wired first (Select tool)"); return; }
+    workModeSheet(actionable);
+  });
   $("#m-undo").addEventListener("click", () => {
     if (M.active && M.active.points.length) {
       M.ptRedo.push(M.active.points.pop());
@@ -1842,6 +1947,22 @@ async function renderMapEditor(main) {
     if (M.active) commitActive();
     if (!M.map.branches.length) { toast("Trace the trunk before saving"); return; }
     await dbPut("maps", M.map);
+    /* Calibrated maps auto-feed the measurement log (spec §4.5) */
+    if (M.map.calibration && M.map.calibration.mmPerPx) {
+      const mmPerPx = M.map.calibration.mmPerPx;
+      const evs = await dbAll("events", "treeId", M.tree.id);
+      const upsert = async (metric, value) => {
+        const ex = evs.find(e => e.type === "measurement" && e.mapId === M.map.id && e.metric === metric);
+        if (ex) { ex.value = value; ex.date = new Date().toISOString(); await dbPut("events", ex); }
+        else await dbPut("events", { id: uid(), treeId: M.tree.id, date: new Date().toISOString(),
+          type: "measurement", metric, value, mapId: M.map.id, source: "map" });
+      };
+      const trunk = M.map.branches.find(b => !b.parentId);
+      if (trunk) await upsert("caliper", Math.round((trunk.thickness || 9) * mmPerPx));
+      let minY = Infinity, maxY = -Infinity;
+      for (const b of M.map.branches) for (const p of b.points) { if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
+      if (isFinite(minY) && maxY > minY) await upsert("height", Math.round((maxY - minY) * mmPerPx));
+    }
     toast("Map v" + M.map.version + " saved 🗺️");
     exitMapEditor();
   });
