@@ -1083,14 +1083,17 @@ function workSheet(tree) {
   sheet("<h2>Log work</h2>" +
     '<label for="w-type">What was done</label><select id="w-type">' +
     WORK_TYPES.map(w => "<option>" + w + "</option>").join("") + "</select>" +
+    '<label for="w-date">When</label><input id="w-date" type="date" value="' + todayISO() + '" max="' + todayISO() + '">' +
     '<label for="w-body">Details (optional)</label><textarea id="w-body" rows="3" placeholder="e.g. Removed lowest left branch, sealed cut"></textarea>' +
     '<button class="btn" id="w-save">Log it</button>' +
     '<button class="btn secondary" id="w-cancel">Cancel</button>',
     (el) => {
       el.querySelector("#w-cancel").addEventListener("click", closeSheet);
       el.querySelector("#w-save").addEventListener("click", async () => {
+        const d = el.querySelector("#w-date").value || todayISO();
+        const dateISO = d === todayISO() ? new Date().toISOString() : new Date(d + "T12:00:00").toISOString();
         await dbPut("events", {
-          id: uid(), treeId: tree.id, date: new Date().toISOString(), type: "work",
+          id: uid(), treeId: tree.id, date: dateISO, type: "work",
           workType: el.querySelector("#w-type").value, body: el.querySelector("#w-body").value.trim()
         });
         closeSheet(); toast("Work logged"); render();
