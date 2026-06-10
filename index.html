@@ -152,6 +152,22 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
   .flipinner { transition: none; }
 }
 
+/* ---------- Map editor ---------- */
+#mapwrap { position: relative; height: 58vh; background: #20251f; border-radius: var(--radius); overflow: hidden; touch-action: none; box-shadow: var(--shadow); }
+#mapstage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+#mapstage img { display: block; pointer-events: none; user-select: none; -webkit-user-drag: none; }
+#mapstage svg { position: absolute; left: 0; top: 0; pointer-events: none; }
+.mtoolbar { display: flex; gap: 6px; margin: 10px 0; flex-wrap: wrap; }
+.mtool { font-size: 12.5px; font-weight: 650; padding: 9px 13px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--ink-soft); }
+.mtool.active { background: var(--green); border-color: var(--green); color: #F4F1E6; }
+.mtool:active { opacity: .8; }
+.mhint { font-size: 12px; color: var(--ink-soft); margin: 7px 2px 0; min-height: 17px; }
+.bpanel { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 13px 14px; margin-top: 10px; }
+.bpanel h4 { font-size: 13px; font-weight: 700; color: var(--green); margin-bottom: 2px; }
+.statechips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.schip { font-size: 12px; font-weight: 650; padding: 6px 11px; border-radius: 999px; border: 1.5px solid var(--line); color: var(--ink-soft); }
+.schip.active { color: #fff; border-color: transparent; }
+
 /* ---------- FAB ---------- */
 
 #fab {
@@ -303,7 +319,7 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
 /* ============================================================
    CONSTANTS & DATA DEFINITIONS
    ============================================================ */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DB_NAME = "my-trees-and-me";
 
 const STAGES = [
@@ -455,6 +471,11 @@ function openDB() {
       }
       if (!d.objectStoreNames.contains("settings")) {
         d.createObjectStore("settings", { keyPath: "key" });
+      }
+      /* schema v2: versioned tree maps */
+      if (!d.objectStoreNames.contains("maps")) {
+        const mp = d.createObjectStore("maps", { keyPath: "id" });
+        mp.createIndex("treeId", "treeId");
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -649,6 +670,10 @@ async function render() {
     fab.style.display = "flex";
     main.innerHTML = "";
     await renderProfile(main);
+  } else if (state.view === "mapedit") {
+    fab.style.display = "none";
+    main.innerHTML = "";
+    await renderMapEditor(main);
   } else {
     fab.style.display = "none";
     main.innerHTML = "";
@@ -995,13 +1020,12 @@ async function renderProfile(main) {
   main.appendChild(body);
   if (state.tab === "timeline") await renderTimeline(body, tree, events);
   else if (state.tab === "details") renderDetails(body, tree);
+  else if (state.tab === "map") await renderMapTab(body, tree);
   else {
-    const phase = state.tab === "map" ? "Phase 2 — branch mapping" : "Phase 4 — growth charts";
     body.innerHTML =
-      '<div class="empty"><div class="big">' + (state.tab === "map" ? "🗺️" : "📈") + '</div>' +
-      '<div class="h">Coming in ' + phase.split(" — ")[0] + "</div>" +
-      "<div>" + phase.split(" — ")[1].charAt(0).toUpperCase() + phase.split(" — ")[1].slice(1) +
-      " arrives here. Photos and notes you log now<br>become its raw material.</div></div>";
+      '<div class="empty"><div class="big">📈</div>' +
+      '<div class="h">Coming in Phase 4</div>' +
+      "<div>Growth charts arrive here. Maps and measurements<br>you make now become its raw material.</div></div>";
   }
 }
 
@@ -1194,6 +1218,8 @@ function renderDetails(el, tree) {
       for (const e of evs) await dbDelete("events", e.id);
       const phs = await dbAll("photos", "treeId", tree.id);
       for (const p of phs) { await dbDelete("photos", p.id); urlCache.delete(p.id); }
+      const mps = await dbAll("maps", "treeId", tree.id);
+      for (const m of mps) await dbDelete("maps", m.id);
       await dbDelete("trees", tree.id);
       toast(tree.nickname + " removed");
       go("collection");
@@ -1462,6 +1488,349 @@ function staleSheet(tree) {
     });
 }
 
+
+/* ============================================================
+   MAP TAB & EDITOR  (spec §4.4 — Phase 2, increment 1)
+   ============================================================ */
+const STATE_COLORS = { develop: "#6F8F5A", hold: "#8B8678", shorten: "#C08A2D", remove: "#A8442F", wired: "#7A5C3E" };
+const BRANCH_STATES = [["develop", "Develop"], ["hold", "Hold"], ["shorten", "Shorten"], ["remove", "Remove"], ["wired", "Wired"]];
+let M = null; /* live editor session */
+
+async function renderMapTab(body, tree) {
+  const maps = (await dbAll("maps", "treeId", tree.id)).sort((a, b) => b.version - a.version);
+  const photos = (await dbAll("photos", "treeId", tree.id)).sort((a, b) => new Date(b.date) - new Date(a.date));
+  if (!photos.length) {
+    body.innerHTML = '<div class="empty"><div class="big">🗺️</div><div class="h">A map needs a photo</div>' +
+      "<div>Add a photo to the timeline first — leafless,<br>plain background, whole tree in frame.</div></div>";
+    return;
+  }
+  let html = '<button class="btn" id="newmap" style="margin-top:0">➕ New map' + (maps.length ? " (v" + (maps[0].version + 1) + ")" : "") + "</button>";
+  if (maps.length) {
+    html += '<div class="choices" style="margin-top:12px">' + maps.map(m =>
+      '<button class="choice" data-map="' + m.id + '"><span class="ic">🗺️</span><span><span class="t">Map v' + m.version + "</span>" +
+      '<span class="d">' + m.branches.length + " branch" + (m.branches.length === 1 ? "" : "es") + " · " +
+      (m.buds || []).length + " buds · " + fmtDate(m.date) + "</span></span></button>").join("") + "</div>";
+  } else {
+    html += '<p class="subtle" style="margin-top:12px">Trace the trunk first, then branches off it. Every saved map is a dated edition — remap each season and flip between versions to watch the structure evolve.</p>';
+  }
+  body.innerHTML = html;
+  body.querySelector("#newmap").addEventListener("click", () => choosePhotoSheet(tree, photos, maps));
+  body.querySelectorAll("[data-map]").forEach(b => b.addEventListener("click", async () => {
+    const map = await dbGet("maps", b.getAttribute("data-map"));
+    if (map) openMapEditor(tree, map, false);
+  }));
+}
+
+function choosePhotoSheet(tree, photos, maps) {
+  sheet("<h2>Pick the base photo</h2><p class='subtle'>Leafless and plain-background traces best.</p>" +
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px">' +
+    photos.slice(0, 15).map(p =>
+      '<img data-ph="' + p.id + '" src="' + photoURL(p) + '" alt="" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px">').join("") +
+    "</div>" + '<button class="btn secondary" id="cp-cancel">Cancel</button>',
+    (el) => {
+      el.querySelector("#cp-cancel").addEventListener("click", closeSheet);
+      el.querySelectorAll("[data-ph]").forEach(img => img.addEventListener("click", () => {
+        const map = {
+          id: uid(), treeId: tree.id, version: maps.length ? maps[0].version + 1 : 1,
+          date: new Date().toISOString(), basePhotoId: img.getAttribute("data-ph"),
+          calibration: null, branches: [], buds: []
+        };
+        closeSheet();
+        openMapEditor(tree, map, true);
+      }));
+    });
+}
+
+function openMapEditor(tree, map, isNew) {
+  M = {
+    tree, map: JSON.parse(JSON.stringify(map)), isNew: !!isNew, dirty: !!isNew,
+    mode: "branch", active: null, selected: null,
+    s: 1, fit: 1, tx: 0, ty: 0, natW: 0, natH: 0, ptrs: new Map(), moved: 0
+  };
+  state.view = "mapedit";
+  render();
+}
+
+function exitMapEditor() {
+  const treeId = M.tree.id;
+  M = null;
+  state.view = "profile";
+  state.treeId = treeId;
+  state.tab = "map";
+  render();
+}
+
+async function renderMapEditor(main) {
+  if (!M) { go("collection"); return; }
+  $("#apptitle").textContent = "Map v" + M.map.version + " · " + M.tree.nickname;
+  const photo = await dbGet("photos", M.map.basePhotoId);
+  if (!photo) { toast("Base photo is missing"); exitMapEditor(); return; }
+
+  main.innerHTML =
+    '<div class="orgrow" style="margin-bottom:6px">' +
+    '<button class="minibtn" id="m-back">← Back</button><span class="orgsum"></span>' +
+    '<button class="orgbtn" id="m-save">💾 Save map</button></div>' +
+    '<div class="mtoolbar">' +
+    '<button class="mtool" data-mode="pan">✋ Pan</button>' +
+    '<button class="mtool" data-mode="branch">🌿 Branch</button>' +
+    '<button class="mtool" data-mode="bud">🟡 Bud</button>' +
+    '<button class="mtool" data-mode="select">👆 Select</button>' +
+    '<button class="mtool" id="m-undo">↩ Undo</button>' +
+    '<button class="mtool" id="m-end" style="display:none">✔ End branch</button>' +
+    "</div>" +
+    '<div id="mapwrap"><div id="mapstage"><img id="m-img" alt="">' +
+    '<svg id="m-svg" xmlns="http://www.w3.org/2000/svg"></svg></div></div>' +
+    '<div class="mhint" id="m-hint"></div><div id="m-bpanel"></div>';
+
+  const wrap = $("#mapwrap"), stage = $("#mapstage"), img = $("#m-img"), svg = $("#m-svg");
+
+  const setTransform = () => { stage.style.transform = "translate(" + M.tx + "px," + M.ty + "px) scale(" + M.s + ")"; };
+  const hint = (t) => { $("#m-hint").textContent = t; };
+  const modeHints = {
+    pan: "Drag to move, pinch to zoom.",
+    branch: M.map.branches.length ? "Tap an existing branch to start a new one growing from it." : "Tap the base of the trunk to start tracing.",
+    bud: "Tap to mark buds — they drive pruning predictions later.",
+    select: "Tap a branch to label or tag it; tap a bud to remove it."
+  };
+
+  function redraw() {
+    let out = "";
+    for (const b of M.map.branches) {
+      const pts = b.points.map(p => p.x + "," + p.y).join(" ");
+      const w = b.parentId ? 5 : 9;
+      if (b.id === M.selected) out += '<polyline points="' + pts + '" fill="none" stroke="#FFFFFF" stroke-width="' + (w + 5) + '" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>';
+      out += '<polyline points="' + pts + '" fill="none" stroke="' + (STATE_COLORS[b.state] || STATE_COLORS.develop) + '" stroke-width="' + w + '" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>';
+    }
+    if (M.active) {
+      const pts = M.active.points.map(p => p.x + "," + p.y).join(" ");
+      if (M.active.points.length > 1) out += '<polyline points="' + pts + '" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-dasharray="10 8" stroke-linecap="round"/>';
+      for (const p of M.active.points) out += '<circle cx="' + p.x + '" cy="' + p.y + '" r="7" fill="#FFFFFF" opacity="0.9"/>';
+    }
+    for (const bud of (M.map.buds || [])) {
+      out += '<circle cx="' + bud.x + '" cy="' + bud.y + '" r="8" fill="#F2C744" stroke="#FFFFFF" stroke-width="3"/>';
+    }
+    svg.innerHTML = out;
+  }
+
+  function distToSeg(p, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const L2 = dx * dx + dy * dy;
+    let t = L2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / L2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const q = { x: a.x + t * dx, y: a.y + t * dy };
+    return { d: Math.hypot(p.x - q.x, p.y - q.y), q };
+  }
+  function nearestOnBranches(p, thresh) {
+    let best = null;
+    for (const b of M.map.branches) {
+      for (let i = 0; i < b.points.length - 1; i++) {
+        const r = distToSeg(p, b.points[i], b.points[i + 1]);
+        if (r.d < thresh && (!best || r.d < best.d)) best = { d: r.d, pt: r.q, branchId: b.id };
+      }
+    }
+    return best;
+  }
+
+  function commitActive() {
+    if (!M.active) return;
+    if (M.active.points.length >= 2) {
+      M.map.branches.push(M.active);
+      M.dirty = true;
+      hint((M.map.branches.length === 1 ? "Trunk" : "Branch") + " saved — " + M.map.branches.length + " traced.");
+    } else {
+      hint("Branch discarded — it needs at least two points.");
+    }
+    M.active = null;
+    $("#m-end").style.display = "none";
+    redraw();
+  }
+
+  function setMode(mode) {
+    if (M.active) commitActive();
+    M.mode = mode;
+    M.selected = null;
+    renderBranchPanel();
+    main.querySelectorAll("[data-mode]").forEach(b =>
+      b.classList.toggle("active", b.getAttribute("data-mode") === mode));
+    hint(modeHints[mode]);
+    redraw();
+  }
+
+  function imgPt(e) {
+    const r = wrap.getBoundingClientRect();
+    return { x: (e.clientX - r.left - M.tx) / M.s, y: (e.clientY - r.top - M.ty) / M.s };
+  }
+
+  function handleTap(e) {
+    const p = imgPt(e);
+    if (p.x < 0 || p.y < 0 || p.x > M.natW || p.y > M.natH) return;
+    if (M.mode === "branch") {
+      if (!M.active) {
+        if (!M.map.branches.length) {
+          M.active = { id: uid(), parentId: null, points: [p], state: "develop", label: "Trunk" };
+          hint("Trunk started — keep tapping up the trunk line, then ✔ End branch.");
+        } else {
+          const near = nearestOnBranches(p, 32 / M.s);
+          if (!near) { hint("Start a branch by tapping ON the trunk or a parent branch."); return; }
+          M.active = { id: uid(), parentId: near.branchId, points: [near.pt], state: "develop", label: "" };
+          hint("Branch started — tap along it, then ✔ End branch.");
+        }
+        $("#m-end").style.display = "";
+      } else {
+        M.active.points.push(p);
+      }
+      redraw();
+    } else if (M.mode === "bud") {
+      M.map.buds = M.map.buds || [];
+      M.map.buds.push({ id: uid(), x: p.x, y: p.y });
+      M.dirty = true;
+      redraw();
+    } else if (M.mode === "select") {
+      const buds = M.map.buds || [];
+      for (let i = buds.length - 1; i >= 0; i--) {
+        if (Math.hypot(p.x - buds[i].x, p.y - buds[i].y) < 24 / M.s) {
+          buds.splice(i, 1);
+          M.dirty = true;
+          hint("Bud removed.");
+          redraw();
+          return;
+        }
+      }
+      const near = nearestOnBranches(p, 28 / M.s);
+      M.selected = near ? near.branchId : null;
+      renderBranchPanel();
+      redraw();
+    }
+  }
+
+  function renderBranchPanel() {
+    const panel = $("#m-bpanel");
+    if (!M.selected) { panel.innerHTML = ""; return; }
+    const b = M.map.branches.find(x => x.id === M.selected);
+    if (!b) { panel.innerHTML = ""; return; }
+    panel.innerHTML = '<div class="bpanel"><h4>' + (b.parentId ? "Branch" : "Trunk") + "</h4>" +
+      '<label for="b-label" style="margin-top:8px">Label</label>' +
+      '<input id="b-label" maxlength="40" placeholder="e.g. First branch left, sacrifice leader" value="' + esc(b.label || "") + '">' +
+      '<div class="statechips">' + BRANCH_STATES.map(([id, name]) =>
+        '<button class="schip' + (b.state === id ? " active" : "") + '" data-state="' + id + '"' +
+        (b.state === id ? ' style="background:' + STATE_COLORS[id] + '"' : "") + ">" + name + "</button>").join("") + "</div>" +
+      '<div style="display:flex;gap:8px;margin-top:12px">' +
+      '<button class="minibtn danger" id="b-del">Delete branch</button>' +
+      '<button class="minibtn" id="b-done">Done</button></div></div>';
+    panel.querySelector("#b-label").addEventListener("input", (ev) => { b.label = ev.target.value; M.dirty = true; });
+    panel.querySelectorAll("[data-state]").forEach(c => c.addEventListener("click", () => {
+      b.state = c.getAttribute("data-state");
+      M.dirty = true;
+      renderBranchPanel();
+      redraw();
+    }));
+    panel.querySelector("#b-del").addEventListener("click", () => {
+      if (M.map.branches.some(x => x.parentId === b.id)) { toast("Delete its child branches first"); return; }
+      M.map.branches = M.map.branches.filter(x => x.id !== b.id);
+      M.selected = null;
+      M.dirty = true;
+      renderBranchPanel();
+      redraw();
+    });
+    panel.querySelector("#b-done").addEventListener("click", () => { M.selected = null; renderBranchPanel(); redraw(); });
+  }
+
+  /* ----- pointer gestures: one-finger pan, pinch zoom, tap = tool ----- */
+  wrap.addEventListener("pointerdown", (e) => {
+    wrap.setPointerCapture(e.pointerId);
+    M.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (M.ptrs.size === 1) M.moved = 0;
+  });
+  wrap.addEventListener("pointermove", (e) => {
+    if (!M.ptrs.has(e.pointerId)) return;
+    const prev = M.ptrs.get(e.pointerId);
+    const cur = { x: e.clientX, y: e.clientY };
+    if (M.ptrs.size === 1) {
+      M.tx += cur.x - prev.x;
+      M.ty += cur.y - prev.y;
+      M.moved += Math.hypot(cur.x - prev.x, cur.y - prev.y);
+      M.ptrs.set(e.pointerId, cur);
+      setTransform();
+    } else if (M.ptrs.size === 2) {
+      const ids = [...M.ptrs.keys()];
+      const other = M.ptrs.get(ids[0] === e.pointerId ? ids[1] : ids[0]);
+      const oldD = Math.hypot(prev.x - other.x, prev.y - other.y) || 1;
+      const newD = Math.hypot(cur.x - other.x, cur.y - other.y) || 1;
+      const r = wrap.getBoundingClientRect();
+      const mid = { x: (cur.x + other.x) / 2 - r.left, y: (cur.y + other.y) / 2 - r.top };
+      const ns = Math.min(Math.max(M.s * (newD / oldD), M.fit * 0.5), M.fit * 16);
+      const f = ns / M.s;
+      M.tx = mid.x - f * (mid.x - M.tx);
+      M.ty = mid.y - f * (mid.y - M.ty);
+      M.s = ns;
+      M.moved += 10;
+      M.ptrs.set(e.pointerId, cur);
+      setTransform();
+    }
+  });
+  const up = (e) => {
+    if (!M.ptrs.has(e.pointerId)) return;
+    M.ptrs.delete(e.pointerId);
+    if (M.ptrs.size === 0 && M.moved < 7) handleTap(e);
+  };
+  wrap.addEventListener("pointerup", up);
+  wrap.addEventListener("pointercancel", (e) => M.ptrs.delete(e.pointerId));
+
+  /* ----- toolbar + save/back ----- */
+  main.querySelectorAll("[data-mode]").forEach(b =>
+    b.addEventListener("click", () => setMode(b.getAttribute("data-mode"))));
+  $("#m-end").addEventListener("click", commitActive);
+  $("#m-undo").addEventListener("click", () => {
+    if (M.active) {
+      M.active.points.pop();
+      if (!M.active.points.length) { M.active = null; $("#m-end").style.display = "none"; hint(modeHints.branch); }
+      redraw();
+      return;
+    }
+    const last = M.map.branches[M.map.branches.length - 1];
+    if (!last) { hint("Nothing to undo."); return; }
+    if (M.map.branches.some(x => x.parentId === last.id)) { toast("That branch has children — delete those first (Select mode)"); return; }
+    M.map.branches.pop();
+    M.dirty = true;
+    redraw();
+    hint("Removed last branch.");
+  });
+  $("#m-save").addEventListener("click", async () => {
+    if (M.active) commitActive();
+    if (!M.map.branches.length) { toast("Trace the trunk before saving"); return; }
+    await dbPut("maps", M.map);
+    toast("Map v" + M.map.version + " saved 🗺️");
+    exitMapEditor();
+  });
+  $("#m-back").addEventListener("click", () => {
+    if (M.dirty) {
+      confirmSheet("Leave without saving?", "This map's unsaved tracing will be lost.", exitMapEditor);
+    } else {
+      exitMapEditor();
+    }
+  });
+
+  /* ----- load image, fit to frame ----- */
+  img.onload = () => {
+    M.natW = img.naturalWidth;
+    M.natH = img.naturalHeight;
+    img.style.width = M.natW + "px";
+    img.style.height = M.natH + "px";
+    svg.setAttribute("width", M.natW);
+    svg.setAttribute("height", M.natH);
+    svg.setAttribute("viewBox", "0 0 " + M.natW + " " + M.natH);
+    const r = wrap.getBoundingClientRect();
+    M.fit = Math.min(r.width / M.natW, r.height / M.natH);
+    M.s = M.fit;
+    M.tx = (r.width - M.natW * M.s) / 2;
+    M.ty = (r.height - M.natH * M.s) / 2;
+    setTransform();
+    redraw();
+  };
+  img.src = photoURL(photo);
+  setMode(M.mode);
+}
+
 /* ============================================================
    STATS  (spec §4.2)
    ============================================================ */
@@ -1534,6 +1903,7 @@ async function renderBackup(main) {
         exportedAt: new Date().toISOString(),
         trees: await dbAll("trees"),
         events: await dbAll("events"),
+        maps: await dbAll("maps"),
         settings: await dbAll("settings"),
         photos: []
       };
@@ -1569,9 +1939,10 @@ async function renderBackup(main) {
           if (data.app !== "my-trees-and-me") throw new Error("That isn't a My Trees and Me backup file.");
           if (data.schemaVersion > SCHEMA_VERSION) throw new Error("That backup is from a newer app version. Update the app first.");
           /* Future: schema migrations branch here on data.schemaVersion */
-          await dbClear("trees"); await dbClear("events"); await dbClear("photos"); await dbClear("settings");
+          await dbClear("trees"); await dbClear("events"); await dbClear("photos"); await dbClear("settings"); await dbClear("maps");
           urlCache.clear();
           for (const t of data.trees || []) await dbPut("trees", t);
+          for (const m of data.maps || []) await dbPut("maps", m);
           for (const e of data.events || []) await dbPut("events", e);
           for (const s of data.settings || []) await dbPut("settings", s);
           for (const p of data.photos || []) {
