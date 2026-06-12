@@ -186,6 +186,16 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
 @keyframes scorepop { from { transform: translateY(0); opacity: 1; } to { transform: translateY(-24px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .scorepop { animation: none; opacity: 0; } }
 
+/* ---------- Calendar + species library ---------- */
+.agrow { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.agrow:last-child { border-bottom: none; }
+.agrow .at { font-size: 14.5px; font-weight: 650; }
+.agrow .ad { font-size: 12px; color: var(--ink-soft); margin-top: 1px; }
+.panel.overduep h3 { color: var(--danger); }
+.monthgrid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-top: 6px; }
+.mchip { font-size: 11px; padding: 8px 0; text-align: center; border: 1px solid var(--line); border-radius: 8px; font-weight: 650; color: var(--ink-soft); background: var(--surface); }
+.mchip.on { background: var(--green); color: #F4F1E6; border-color: var(--green); }
+
 /* ---------- FAB ---------- */
 
 #fab {
@@ -324,7 +334,7 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
     <div class="s">A bonsai collection, honestly kept</div>
   </div>
   <nav id="drawernav"></nav>
-  <div class="foot">Phase 1 · schema v1 · data lives on this device — back up regularly</div>
+  <div class="foot">My Trees and Me · on-device data — back up regularly</div>
 </aside>
 
 <main id="main"></main>
@@ -337,7 +347,7 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--ink-soft
 /* ============================================================
    CONSTANTS & DATA DEFINITIONS
    ============================================================ */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const DB_NAME = "my-trees-and-me";
 
 const STAGES = [
@@ -460,8 +470,9 @@ function bdayActive(tree) {
 }
 /* Foil placeholder until Phase 6 species difficulty ratings */
 const HOLO_SPECIES = /banksia|eucalypt|corymbia|casuarina|allocasuarina|melaleuca|leptospermum|kunzea|pinus|\bpine\b|juniper/i;
-function cardFinish(tree) {
+function cardFinish(tree, sp) {
   if (tree.stage === "exhibition") return "gold";
+  if (sp && Number(sp.difficulty) >= 4) return "holo";
   if (HOLO_SPECIES.test(tree.species || "")) return "holo";
   return "";
 }
@@ -494,6 +505,14 @@ function openDB() {
       if (!d.objectStoreNames.contains("maps")) {
         const mp = d.createObjectStore("maps", { keyPath: "id" });
         mp.createIndex("treeId", "treeId");
+      }
+      /* schema v3: species protocols + tasks */
+      if (!d.objectStoreNames.contains("species")) {
+        d.createObjectStore("species", { keyPath: "id" });
+      }
+      if (!d.objectStoreNames.contains("tasks")) {
+        const tk = d.createObjectStore("tasks", { keyPath: "id" });
+        tk.createIndex("treeId", "treeId");
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -617,6 +636,11 @@ async function attentionInfo(tree, events) {
   const photoEvents = events.filter(e => e.type === "photo");
   const last = photoEvents.length ? Math.max(...photoEvents.map(e => new Date(e.date).getTime())) : null;
   const snooze = tree.snoozeUntil ? new Date(tree.snoozeUntil).getTime() : 0;
+  try {
+    const tks = await dbAll("tasks", "treeId", tree.id);
+    const od = tks.find(t => !t.done && t.due && new Date(t.due).getTime() < Date.now());
+    if (od) return { reason: "Overdue: " + od.title };
+  } catch (e) {}
   if (Date.now() < snooze) return null;
   const limit = staleWeeks * 7 * 864e5;
   if (last === null) {
@@ -698,6 +722,8 @@ async function render() {
     if (state.view === "stats") await renderStats(main);
     else if (state.view === "backup") await renderBackup(main);
     else if (state.view === "settings") await renderSettings(main);
+    else if (state.view === "calendar") await renderCalendar(main);
+    else if (state.view === "species") await renderSpecies(main);
     else renderStub(main, state.view);
   }
 }
@@ -822,7 +848,8 @@ async function makeCard(tree, events, attn, totd) {
       return "<span>" + def.emoji + " " + agoText(lastCareTime(events, def)) + "</span>";
     }).join("");
     const btn = document.createElement("button");
-    const finish = cardFinish(tree);
+    const spRec = await dbGet("species", normName(tree.species));
+    const finish = cardFinish(tree, spRec);
     btn.className = "card" + (finish ? " " + finish : "") + (tree.id === totd ? " totd" : "");
     btn.innerHTML =
       (hero ? '<img class="ph" alt="" src="' + photoURL(hero) + '">' : '<div class="noph">🌳</div>') +
@@ -1049,6 +1076,23 @@ async function renderProfile(main) {
   }
   main.appendChild(carebar);
 
+  /* "Right now" — what this tree wants (spec §4.7) */
+  try {
+    const spRec = await dbGet("species", normName(tree.species));
+    const openTasks = (await dbAll("tasks", "treeId", tree.id)).filter(t => !t.done);
+    const agenda = agendaForTree(tree, events, spRec, openTasks)
+      .filter(i => i.urg !== "soon").slice(0, 3);
+    if (agenda.length) {
+      const rn = document.createElement("div");
+      rn.className = "pinstrip";
+      rn.style.marginTop = "12px";
+      rn.innerHTML = '<div class="ph2">🕒 Right now</div>' + agenda.map(i =>
+        '<div class="pn"><span>' + (i.urg === "overdue" ? "⚠️ " : "") + esc(i.label) +
+        ' <span class="subtle">— ' + esc(i.info) + "</span></span></div>").join("");
+      main.appendChild(rn);
+    }
+  } catch (e) {}
+
   const tabs = document.createElement("div");
   tabs.className = "tabs";
   [["timeline", "Timeline"], ["map", "Map"], ["growth", "Growth"], ["details", "Details"]].forEach(([id, label]) => {
@@ -1260,6 +1304,8 @@ function renderDetails(el, tree) {
       for (const p of phs) { await dbDelete("photos", p.id); urlCache.delete(p.id); }
       const mps = await dbAll("maps", "treeId", tree.id);
       for (const m of mps) await dbDelete("maps", m.id);
+      const tks = await dbAll("tasks", "treeId", tree.id);
+      for (const t of tks) await dbDelete("tasks", t.id);
       await dbDelete("trees", tree.id);
       toast(tree.nickname + " removed");
       go("collection");
@@ -1468,11 +1514,14 @@ function workSheet(tree) {
       el.querySelector("#w-save").addEventListener("click", async () => {
         const d = el.querySelector("#w-date").value || todayISO();
         const dateISO = d === todayISO() ? new Date().toISOString() : new Date(d + "T12:00:00").toISOString();
+        const wType = el.querySelector("#w-type").value;
         await dbPut("events", {
           id: uid(), treeId: tree.id, date: dateISO, type: "work",
-          workType: el.querySelector("#w-type").value, body: el.querySelector("#w-body").value.trim()
+          workType: wType, body: el.querySelector("#w-body").value.trim()
         });
-        closeSheet(); toast("Work logged"); render();
+        closeSheet();
+        await maybeFollowUp(tree, wType);
+        render();
       });
     });
 }
@@ -1589,6 +1638,274 @@ function staleSheet(tree) {
     });
 }
 
+
+/* ============================================================
+   SPECIES LIBRARY & CALENDAR  (spec §4.7 — Phase 6)
+   ============================================================ */
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function normName(s) { return (s || "").trim().toLowerCase() || "unknown"; }
+function monthsLabel(months) { return (months || []).map(m => MONTHS_SHORT[m - 1]).join(" "); }
+function windowStatus(months) {
+  if (!months || !months.length) return { state: "later" };
+  const m = new Date().getMonth() + 1;
+  if (months.includes(m)) return { state: "open" };
+  let best = 99;
+  for (const mm of months) { const d = (mm - m + 12) % 12; if (d > 0 && d < best) best = d; }
+  return best <= 2 ? { state: "soon", inMonths: best } : { state: "later", inMonths: best };
+}
+function lastLinkedTime(events, link) {
+  if (!link) return null;
+  let last = null;
+  for (const e of events) {
+    const hit = (e.type === "care" && e.careType === link) || (e.type === "work" && e.workType === link);
+    if (hit) { const t = new Date(e.date).getTime(); if (!last || t > last) last = t; }
+  }
+  return last;
+}
+function agendaForTree(tree, events, sp, openTasks) {
+  const out = [];
+  const nowM = new Date().getMonth() + 1;
+  for (const t of openTasks || []) {
+    if (!t.due) continue;
+    const days = Math.ceil((new Date(t.due) - Date.now()) / 864e5);
+    if (days < 0) out.push({ urg: "overdue", tree, label: t.title, info: Math.abs(days) + "d overdue", action: { kind: "task", id: t.id } });
+    else if (days <= 14) out.push({ urg: "soon", tree, label: t.title, info: "in " + days + "d", action: { kind: "task", id: t.id } });
+  }
+  for (const pt of (sp && sp.tasks) || []) {
+    if (pt.type === "window") {
+      const st = windowStatus(pt.months);
+      if (st.state === "open") out.push({ urg: "now", tree, label: pt.title, info: "window open · " + monthsLabel(pt.months), action: { kind: "tree" } });
+      else if (st.state === "soon") out.push({ urg: "soon", tree, label: pt.title, info: "opens in ~" + st.inMonths + " month" + (st.inMonths === 1 ? "" : "s"), action: { kind: "tree" } });
+    } else if (pt.type === "recurring" && (pt.months || []).includes(nowM)) {
+      const last = lastLinkedTime(events, pt.link);
+      const every = pt.everyDays || 14;
+      const days = last ? Math.floor((Date.now() - last) / 864e5) : null;
+      if (days === null || days >= every) {
+        const urg = days !== null && days >= every * 1.7 ? "overdue" : "now";
+        const careLinked = pt.link && CARE_DEFS.some(c => c.careType === pt.link);
+        out.push({ urg, tree, label: pt.title,
+          info: days === null ? "not logged yet · every " + every + "d" : "last " + days + "d ago · every " + every + "d",
+          action: careLinked ? { kind: "care", careType: pt.link } : { kind: "tree" } });
+      }
+    }
+  }
+  return out;
+}
+async function maybeFollowUp(tree, workType) {
+  let f = null;
+  if (workType === "Wire") f = { title: "Check wire bite", days: 42 };
+  else if (workType === "Repot") f = { title: "Resume fertiliser (gently)", days: 28 };
+  if (!f) { toast("Work logged"); return; }
+  await dbPut("tasks", { id: uid(), treeId: tree.id, title: f.title, type: "followup",
+    due: new Date(Date.now() + f.days * 864e5).toISOString(), done: false });
+  toast("Work logged · follow-up in " + Math.round(f.days / 7) + " wks: " + f.title);
+}
+
+/* ---------- Calendar (sidebar) ---------- */
+async function renderCalendar(main) {
+  $("#apptitle").textContent = "Calendar";
+  const trees = await dbAll("trees");
+  if (!trees.length) {
+    main.innerHTML = '<div class="viewtitle">Calendar</div><div class="empty"><div class="big">📅</div><div class="h">No trees yet</div><div>Add a tree and give its species a protocol.</div></div>';
+    return;
+  }
+  const events = await dbAll("events");
+  const tasksAll = await dbAll("tasks");
+  const items = [];
+  for (const tree of trees) {
+    const ev = events.filter(e => e.treeId === tree.id);
+    const sp = await dbGet("species", normName(tree.species));
+    const tks = tasksAll.filter(t => t.treeId === tree.id && !t.done);
+    items.push(...agendaForTree(tree, ev, sp, tks));
+  }
+  const sects = [["overdue", "⚠️ Overdue", "overduep"], ["now", "🕒 Open now", ""], ["soon", "🌤️ Coming up", ""]];
+  let html = '<div class="viewtitle">Calendar</div>';
+  let any = false;
+  for (const [key, title, cls] of sects) {
+    const list = items.filter(i => i.urg === key);
+    if (!list.length) continue;
+    any = true;
+    html += '<div class="panel ' + cls + '"><h3>' + title + "</h3>" + list.map((i, idx) =>
+      '<div class="agrow"><div><div class="at">' + esc(i.label) + '</div><div class="ad">' +
+      esc(i.tree.nickname) + " · " + esc(i.info) + "</div></div>" +
+      '<button class="minibtn" data-ag="' + key + "-" + idx + '">' +
+      (i.action.kind === "care" ? "Log now" : i.action.kind === "task" ? "Done ✓" : "Open tree") +
+      "</button></div>").join("") + "</div>";
+  }
+  if (!any) html += '<div class="empty"><div class="big">🍃</div><div class="h">Nothing on</div><div>The trees are content — or their species need protocols.<br>Build those in the Species Library.</div></div>';
+  else html += '<p class="subtle">Windows and recurring jobs come from species protocols (Species Library). Follow-ups come from logged work.</p>';
+  main.innerHTML = html;
+  main.querySelectorAll("[data-ag]").forEach(btn => btn.addEventListener("click", async () => {
+    const [key, idx] = btn.getAttribute("data-ag").split("-");
+    const i = items.filter(x => x.urg === key)[Number(idx)];
+    if (!i) return;
+    if (i.action.kind === "care") {
+      await dbPut("events", { id: uid(), treeId: i.tree.id, date: new Date().toISOString(), type: "care", careType: i.action.careType });
+      toast("Logged for " + i.tree.nickname);
+      render();
+    } else if (i.action.kind === "task") {
+      const t = await dbGet("tasks", i.action.id);
+      if (t) { t.done = true; t.doneDate = new Date().toISOString(); await dbPut("tasks", t); }
+      toast("Done ✓");
+      render();
+    } else {
+      go("profile", i.tree.id);
+    }
+  }));
+}
+
+/* ---------- Species library (sidebar) ---------- */
+async function renderSpecies(main) {
+  $("#apptitle").textContent = "Species Library";
+  const trees = await dbAll("trees");
+  const recs = await dbAll("species");
+  const byId = {};
+  for (const r of recs) byId[r.id] = r;
+  for (const t of trees) {
+    const id = normName(t.species);
+    if (!byId[id]) byId[id] = { id, name: t.species || "Unknown", difficulty: 3, notes: "", tasks: [] };
+  }
+  const list = Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
+  let html = '<div class="viewtitle">Species Library</div>';
+  if (!list.length) {
+    html += '<div class="empty"><div class="big">📚</div><div class="h">Empty shelves</div><div>Add a tree, or add a species manually below.</div></div>';
+  } else {
+    html += '<div class="choices">' + list.map(r =>
+      '<button class="choice" data-sp="' + esc(r.id) + '"><span class="ic">🌿</span><span><span class="t">' + esc(r.name) + "</span>" +
+      '<span class="d">' + "★".repeat(Number(r.difficulty) || 3) + "☆".repeat(5 - (Number(r.difficulty) || 3)) +
+      " · " + (r.tasks || []).length + " protocol task" + ((r.tasks || []).length === 1 ? "" : "s") + "</span></span></button>").join("") + "</div>";
+  }
+  html += '<button class="btn secondary" id="sp-add">➕ Add a species</button>' +
+    '<p class="subtle">4★+ difficulty earns the holographic card finish.</p>';
+  main.innerHTML = html;
+  main.querySelectorAll("[data-sp]").forEach(b => b.addEventListener("click", () => speciesSheet(byId[b.getAttribute("data-sp")])));
+  main.querySelector("#sp-add").addEventListener("click", () => {
+    sheet("<h2>Add a species</h2><label for='spn'>Species name</label><input id='spn' maxlength='60' placeholder='e.g. Acer palmatum'>" +
+      "<button class='btn' id='spgo'>Open it</button><button class='btn secondary' id='spc'>Cancel</button>",
+      (el) => {
+        el.querySelector("#spc").addEventListener("click", closeSheet);
+        el.querySelector("#spgo").addEventListener("click", () => {
+          const n = el.querySelector("#spn").value.trim();
+          if (!n) { toast("Name it first"); return; }
+          speciesSheet({ id: normName(n), name: n, difficulty: 3, notes: "", tasks: [] });
+        });
+      });
+  });
+}
+
+function taskRow(t) {
+  const meta = t.type === "window" ? "Window · " + monthsLabel(t.months)
+    : "Every " + (t.everyDays || 14) + "d · " + monthsLabel(t.months);
+  return '<div class="agrow"><div><div class="at">' + esc(t.title) + '</div><div class="ad">' + esc(meta) +
+    (t.link ? " · logs as " + esc(t.link) : "") + '</div></div><button class="minibtn" data-tk="' + t.id + '">Edit</button></div>';
+}
+
+function speciesSheet(rec) {
+  rec.tasks = rec.tasks || [];
+  const isBanksia = /banksia/i.test(rec.name);
+  sheet("<h2>" + esc(rec.name) + "</h2>" +
+    '<label for="sp-diff">Difficulty</label><select id="sp-diff">' +
+    [1, 2, 3, 4, 5].map(n => '<option value="' + n + '"' + (Number(rec.difficulty) === n ? " selected" : "") + ">" +
+      "★".repeat(n) + "☆".repeat(5 - n) + (n >= 4 ? " (holo card)" : "") + "</option>").join("") + "</select>" +
+    '<label for="sp-notes">Species notes</label><textarea id="sp-notes" rows="3" placeholder="Soil mix, quirks, hard-won lessons…">' + esc(rec.notes || "") + "</textarea>" +
+    "<label>Protocol — Canberra calendar</label>" +
+    '<div id="sp-tasks">' + (rec.tasks.length ? rec.tasks.map(taskRow).join("") : '<p class="subtle">No tasks yet — add one, or load a starter.</p>') + "</div>" +
+    '<button class="btn secondary" id="sp-newtask">➕ Add protocol task</button>' +
+    (rec.tasks.length ? "" :
+      (isBanksia ? '<button class="btn secondary" id="sp-seed-b">🌿 Load Banksia serrata starter (zero-P, Aug–Sep prune)</button>' : "") +
+      '<button class="btn secondary" id="sp-seed-d">🍂 Load generic deciduous starter</button>') +
+    '<button class="btn" id="sp-save">Save species</button>' +
+    '<button class="btn secondary" id="sp-cancel">Cancel</button>',
+    (el) => {
+      const persist = async () => {
+        rec.difficulty = Number(el.querySelector("#sp-diff").value);
+        rec.notes = el.querySelector("#sp-notes").value.trim();
+        await dbPut("species", rec);
+      };
+      el.querySelector("#sp-cancel").addEventListener("click", closeSheet);
+      el.querySelector("#sp-save").addEventListener("click", async () => {
+        await persist();
+        closeSheet();
+        toast(rec.name + " saved");
+        render();
+      });
+      el.querySelector("#sp-newtask").addEventListener("click", async () => { await persist(); taskEditSheet(rec, null); });
+      el.querySelectorAll("[data-tk]").forEach(b => b.addEventListener("click", async () => {
+        await persist();
+        taskEditSheet(rec, rec.tasks.find(t => t.id === b.getAttribute("data-tk")));
+      }));
+      const seedB = el.querySelector("#sp-seed-b");
+      if (seedB) seedB.addEventListener("click", async () => {
+        rec.tasks = [
+          { id: uid(), title: "Structural prune", type: "window", months: [8, 9], link: "Prune" },
+          { id: uid(), title: "Repot window", type: "window", months: [9, 10], link: "Repot" },
+          { id: uid(), title: "Zero-P native fertiliser", type: "recurring", months: [9, 10, 11, 12, 1, 2, 3], everyDays: 14, link: "Fertilised" }
+        ];
+        if (!rec.notes) rec.notes = "Zero-phosphorus fertiliser only. Native mix ~60/30/10.";
+        await persist();
+        speciesSheet(rec);
+      });
+      const seedD = el.querySelector("#sp-seed-d");
+      if (seedD) seedD.addEventListener("click", async () => {
+        rec.tasks = [
+          { id: uid(), title: "Winter structural prune", type: "window", months: [6, 7], link: "Prune" },
+          { id: uid(), title: "Repot before bud burst", type: "window", months: [8, 9], link: "Repot" },
+          { id: uid(), title: "Growing-season fertiliser", type: "recurring", months: [9, 10, 11, 12, 1, 2, 3], everyDays: 14, link: "Fertilised" },
+          { id: uid(), title: "Wire check", type: "recurring", months: [10, 11, 12, 1, 2], everyDays: 42, link: "Wire" }
+        ];
+        await persist();
+        speciesSheet(rec);
+      });
+    });
+}
+
+function taskEditSheet(rec, task) {
+  const t = task || { id: uid(), title: "", type: "window", months: [], everyDays: 14, link: "" };
+  const LINKS = ["", "Watered", "Fertilised", "Misted", "Prune", "Wire", "Repot", "Defoliate"];
+  sheet("<h2>" + (task ? "Edit" : "New") + " protocol task</h2>" +
+    '<label for="t-title">Title</label><input id="t-title" maxlength="60" placeholder="e.g. Structural prune" value="' + esc(t.title) + '">' +
+    '<label for="t-type">Type</label><select id="t-type">' +
+    '<option value="window"' + (t.type === "window" ? " selected" : "") + ">Seasonal window (do it within these months)</option>" +
+    '<option value="recurring"' + (t.type === "recurring" ? " selected" : "") + ">Recurring (every X days during these months)</option></select>" +
+    "<label>Months</label><div class='monthgrid'>" +
+    MONTHS_SHORT.map((mn, i) => '<button class="mchip' + ((t.months || []).includes(i + 1) ? " on" : "") + '" data-m="' + (i + 1) + '">' + mn + "</button>").join("") + "</div>" +
+    '<label for="t-every">Every X days (recurring only)</label><input id="t-every" type="number" min="1" value="' + (t.everyDays || 14) + '">' +
+    '<label for="t-link">Ticks off when you log…</label><select id="t-link">' +
+    LINKS.map(l => '<option value="' + l + '"' + (t.link === l ? " selected" : "") + ">" + (l || "Nothing (manual)") + "</option>").join("") + "</select>" +
+    '<button class="btn" id="t-save">Save task</button>' +
+    (task ? '<button class="btn danger" id="t-del">Delete task</button>' : "") +
+    '<button class="btn secondary" id="t-cancel">Back</button>',
+    (el) => {
+      const months = new Set(t.months || []);
+      el.querySelectorAll("[data-m]").forEach(c => c.addEventListener("click", () => {
+        const m = Number(c.getAttribute("data-m"));
+        months.has(m) ? months.delete(m) : months.add(m);
+        c.classList.toggle("on", months.has(m));
+      }));
+      el.querySelector("#t-cancel").addEventListener("click", () => speciesSheet(rec));
+      el.querySelector("#t-save").addEventListener("click", async () => {
+        const title = el.querySelector("#t-title").value.trim();
+        if (!title) { toast("Give the task a title"); return; }
+        if (!months.size) { toast("Pick at least one month"); return; }
+        Object.assign(t, {
+          title,
+          type: el.querySelector("#t-type").value,
+          months: [...months].sort((a, b) => a - b),
+          everyDays: Number(el.querySelector("#t-every").value) || 14,
+          link: el.querySelector("#t-link").value || ""
+        });
+        if (!task) rec.tasks.push(t);
+        await dbPut("species", rec);
+        speciesSheet(rec);
+      });
+      const del = el.querySelector("#t-del");
+      if (del) del.addEventListener("click", async () => {
+        rec.tasks = rec.tasks.filter(x => x.id !== t.id);
+        await dbPut("species", rec);
+        speciesSheet(rec);
+      });
+    });
+}
 
 /* ============================================================
    GROWTH TAB  (spec §4.5)
@@ -2322,6 +2639,8 @@ async function renderBackup(main) {
         trees: await dbAll("trees"),
         events: await dbAll("events"),
         maps: await dbAll("maps"),
+        species: await dbAll("species"),
+        tasks: await dbAll("tasks"),
         settings: await dbAll("settings"),
         photos: []
       };
@@ -2358,9 +2677,12 @@ async function renderBackup(main) {
           if (data.schemaVersion > SCHEMA_VERSION) throw new Error("That backup is from a newer app version. Update the app first.");
           /* Future: schema migrations branch here on data.schemaVersion */
           await dbClear("trees"); await dbClear("events"); await dbClear("photos"); await dbClear("settings"); await dbClear("maps");
+          await dbClear("species"); await dbClear("tasks");
           urlCache.clear();
           for (const t of data.trees || []) await dbPut("trees", t);
           for (const m of data.maps || []) await dbPut("maps", m);
+          for (const s of data.species || []) await dbPut("species", s);
+          for (const t of data.tasks || []) await dbPut("tasks", t);
           for (const e of data.events || []) await dbPut("events", e);
           for (const s of data.settings || []) await dbPut("settings", s);
           for (const p of data.photos || []) {
