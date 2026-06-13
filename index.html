@@ -2007,6 +2007,319 @@ async function renderGrowthTab(body, tree, events) {
 }
 
 /* ============================================================
+   CV ASSIST  (spec §4.4 / Phase 3) — classical image processing,
+   in-browser, no AI coordinate guessing. Pipeline: border-sampled
+   background model → Otsu threshold → largest component + closing →
+   Zhang–Suen skeleton → chamfer distance transform (thickness) →
+   graph extraction → branch tree.
+   ============================================================ */
+function cvMedian(arr) {
+  if (!arr.length) return 0;
+  const a = [...arr].sort((x, y) => x - y);
+  return a[a.length >> 1];
+}
+function cvSimplify(pts, eps) {
+  /* Douglas–Peucker */
+  if (pts.length < 3) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [i0, i1] = stack.pop();
+    const a = pts[i0], b = pts[i1];
+    let maxD = 0, maxI = -1;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const L = Math.hypot(dx, dy) || 1;
+    for (let i = i0 + 1; i < i1; i++) {
+      const d = Math.abs(dy * pts[i].x - dx * pts[i].y + b.x * a.y - b.y * a.x) / L;
+      if (d > maxD) { maxD = d; maxI = i; }
+    }
+    if (maxD > eps) { keep[maxI] = 1; stack.push([i0, maxI], [maxI, i1]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+
+async function cvProposeBranches(imgEl, natW, natH, progress) {
+  const yield_ = () => new Promise(r => setTimeout(r, 10));
+  const MAXD = 640;
+  const scale = Math.min(1, MAXD / Math.max(natW, natH));
+  const w = Math.max(2, Math.round(natW * scale));
+  const h = Math.max(2, Math.round(natH * scale));
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(imgEl, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const N = w * h;
+  const I = (x, y) => y * w + x;
+
+  /* --- background model: top/left/right border ring (pot sits at the bottom) --- */
+  progress("Reading the backdrop…"); await yield_();
+  const ring = 8, rs = [], gs = [], bs = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (y < ring || (x < ring && y < h * 0.85) || (x >= w - ring && y < h * 0.85)) {
+      const o = I(x, y) * 4;
+      rs.push(px[o]); gs.push(px[o + 1]); bs.push(px[o + 2]);
+    }
+  }
+  const bgR = cvMedian(rs), bgG = cvMedian(gs), bgB = cvMedian(bs);
+
+  /* --- distance-from-background + Otsu threshold --- */
+  progress("Separating the tree…"); await yield_();
+  const dist = new Float32Array(N);
+  let maxd = 1;
+  for (let i = 0; i < N; i++) {
+    const o = i * 4;
+    const d = Math.hypot(px[o] - bgR, px[o + 1] - bgG, px[o + 2] - bgB);
+    dist[i] = d;
+    if (d > maxd) maxd = d;
+  }
+  const hist = new Float64Array(256);
+  for (let i = 0; i < N; i++) hist[Math.min(255, (dist[i] / maxd * 255) | 0)]++;
+  let sumAll = 0;
+  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
+  let wB = 0, sumB = 0, best = 0, bestT = 64;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (!wB) continue;
+    const wF = N - wB;
+    if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sumAll - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > best) { best = between; bestT = t; }
+  }
+  const thr = bestT / 255 * maxd;
+  let mask = new Uint8Array(N);
+  let fg = 0;
+  for (let i = 0; i < N; i++) if (dist[i] > thr) { mask[i] = 1; fg++; }
+  if (fg / N < 0.02 || fg / N > 0.6) throw new Error("SEG");
+
+  /* --- morphological closing (fill pinholes) --- */
+  progress("Cleaning the silhouette…"); await yield_();
+  const morph = (src, isDilate) => {
+    const out = new Uint8Array(N);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let hit = isDilate ? 0 : 1;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        const v = (nx < 0 || ny < 0 || nx >= w || ny >= h) ? 0 : src[I(nx, ny)];
+        if (isDilate) { if (v) hit = 1; } else { if (!v) hit = 0; }
+      }
+      out[I(x, y)] = hit;
+    }
+    return out;
+  };
+  mask = morph(morph(mask, true), false);
+
+  /* --- keep largest connected component --- */
+  const label = new Int32Array(N);
+  let bestLab = 0, bestSize = 0, lab = 0;
+  const stack = new Int32Array(N);
+  for (let i = 0; i < N; i++) {
+    if (!mask[i] || label[i]) continue;
+    lab++;
+    let top = 0, size = 0;
+    stack[top++] = i; label[i] = lab;
+    while (top) {
+      const c = stack[--top]; size++;
+      const cx = c % w, cyy = (c / w) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx, ny = cyy + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const n = I(nx, ny);
+        if (mask[n] && !label[n]) { label[n] = lab; stack[top++] = n; }
+      }
+    }
+    if (size > bestSize) { bestSize = size; bestLab = lab; }
+  }
+  for (let i = 0; i < N; i++) mask[i] = label[i] === bestLab ? 1 : 0;
+  if (bestSize / N < 0.015) throw new Error("SEG");
+
+  /* --- chamfer distance transform (3-4) --- */
+  progress("Measuring thickness…"); await yield_();
+  const INF = 1e7;
+  const dt = new Float32Array(N);
+  for (let i = 0; i < N; i++) dt[i] = mask[i] ? INF : 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = I(x, y);
+    if (!dt[i]) continue;
+    let v = dt[i];
+    if (x > 0) v = Math.min(v, dt[I(x - 1, y)] + 3);
+    if (y > 0) v = Math.min(v, dt[I(x, y - 1)] + 3);
+    if (x > 0 && y > 0) v = Math.min(v, dt[I(x - 1, y - 1)] + 4);
+    if (x < w - 1 && y > 0) v = Math.min(v, dt[I(x + 1, y - 1)] + 4);
+    dt[i] = v;
+  }
+  for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+    const i = I(x, y);
+    if (!mask[i]) continue;
+    let v = dt[i];
+    if (x < w - 1) v = Math.min(v, dt[I(x + 1, y)] + 3);
+    if (y < h - 1) v = Math.min(v, dt[I(x, y + 1)] + 3);
+    if (x < w - 1 && y < h - 1) v = Math.min(v, dt[I(x + 1, y + 1)] + 4);
+    if (x > 0 && y < h - 1) v = Math.min(v, dt[I(x - 1, y + 1)] + 4);
+    dt[i] = v;
+  }
+
+  /* --- Zhang–Suen thinning --- */
+  progress("Tracing the skeleton…"); await yield_();
+  const skel = Uint8Array.from(mask);
+  const nb = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : skel[I(x, y)];
+  let changed = true, iter = 0;
+  while (changed && iter < 200) {
+    changed = false;
+    for (let pass = 0; pass < 2; pass++) {
+      const del = [];
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+        const i = I(x, y);
+        if (!skel[i]) continue;
+        const p2 = nb(x, y - 1), p3 = nb(x + 1, y - 1), p4 = nb(x + 1, y),
+              p5 = nb(x + 1, y + 1), p6 = nb(x, y + 1), p7 = nb(x - 1, y + 1),
+              p8 = nb(x - 1, y), p9 = nb(x - 1, y - 1);
+        const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+        if (B < 2 || B > 6) continue;
+        const seq = [p2, p3, p4, p5, p6, p7, p8, p9, p2];
+        let A = 0;
+        for (let k = 0; k < 8; k++) if (!seq[k] && seq[k + 1]) A++;
+        if (A !== 1) continue;
+        if (pass === 0) { if (p2 * p4 * p6 || p4 * p6 * p8) continue; }
+        else { if (p2 * p4 * p8 || p2 * p6 * p8) continue; }
+        del.push(i);
+      }
+      for (const i of del) skel[i] = 0;
+      if (del.length) changed = true;
+    }
+    if (++iter % 12 === 0) { progress("Tracing the skeleton… (" + iter + ")"); await yield_(); }
+  }
+
+  /* --- graph extraction --- */
+  progress("Building the branch graph…"); await yield_();
+  const deg = new Uint8Array(N);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = I(x, y);
+    if (!skel[i]) continue;
+    let d = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      if (nb(x + dx, y + dy)) d++;
+    }
+    deg[i] = d;
+  }
+  const nodeMask = new Uint8Array(N);
+  let nodeCount = 0;
+  for (let i = 0; i < N; i++) if (skel[i] && deg[i] !== 2) { nodeMask[i] = 1; nodeCount++; }
+  if (!nodeCount) throw new Error("EMPTY");
+  /* cluster adjacent node pixels */
+  const clusterOf = new Int32Array(N).fill(-1);
+  const clusters = [];
+  for (let i = 0; i < N; i++) {
+    if (!nodeMask[i] || clusterOf[i] >= 0) continue;
+    const cid = clusters.length;
+    const cpix = [];
+    let top = 0;
+    stack[top++] = i; clusterOf[i] = cid;
+    while (top) {
+      const c = stack[--top];
+      cpix.push(c);
+      const cx = c % w, cyy = (c / w) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx, ny = cyy + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const n = I(nx, ny);
+        if (nodeMask[n] && clusterOf[n] < 0) { clusterOf[n] = cid; stack[top++] = n; }
+      }
+    }
+    let sx = 0, sy = 0;
+    for (const p of cpix) { sx += p % w; sy += (p / w) | 0; }
+    clusters.push({ x: sx / cpix.length, y: sy / cpix.length, pix: cpix });
+  }
+  /* trace edges between clusters */
+  const visited = new Uint8Array(N);
+  const edges = [];
+  for (let ci = 0; ci < clusters.length; ci++) {
+    for (const np of clusters[ci].pix) {
+      const nx0 = np % w, ny0 = (np / w) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const sx = nx0 + dx, sy = ny0 + dy;
+        if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+        const s = I(sx, sy);
+        if (!skel[s] || nodeMask[s] || visited[s]) continue;
+        /* walk the chain */
+        const path = [np, s];
+        visited[s] = 1;
+        let prev = np, cur = s, guard = 0;
+        while (guard++ < N) {
+          const cx = cur % w, cyy = (cur / w) | 0;
+          let nxt = -1, nxtNode = -1;
+          for (let ddy = -1; ddy <= 1; ddy++) for (let ddx = -1; ddx <= 1; ddx++) {
+            if (!ddx && !ddy) continue;
+            const qx = cx + ddx, qy = cyy + ddy;
+            if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+            const q = I(qx, qy);
+            if (!skel[q] || q === prev) continue;
+            if (nodeMask[q]) { if (nxtNode < 0) nxtNode = q; }
+            else if (!visited[q] && nxt < 0) nxt = q;
+          }
+          if (nxtNode >= 0) { path.push(nxtNode); break; }
+          if (nxt < 0) break;
+          visited[nxt] = 1;
+          path.push(nxt);
+          prev = cur; cur = nxt;
+        }
+        const endC = clusterOf[path[path.length - 1]];
+        if (endC < 0) continue; /* dead-ended into visited pixels — drop */
+        edges.push({ a: ci, b: endC, path });
+      }
+    }
+  }
+  if (!edges.length) throw new Error("EMPTY");
+  /* prune tiny leaf twigs (noise) */
+  const cdeg = new Int32Array(clusters.length);
+  for (const e of edges) { cdeg[e.a]++; cdeg[e.b]++; }
+  const kept = edges.filter(e =>
+    e.path.length >= 12 || (cdeg[e.a] > 1 && cdeg[e.b] > 1) || edges.length === 1);
+  const finalEdges = kept.length ? kept : edges;
+
+  /* --- BFS from the lowest cluster (trunk base) → branch tree --- */
+  progress("Growing the tree…"); await yield_();
+  let root = 0;
+  for (let i = 1; i < clusters.length; i++) if (clusters[i].y > clusters[root].y) root = i;
+  const adj = clusters.map(() => []);
+  finalEdges.forEach((e, i) => { adj[e.a].push(i); adj[e.b].push(i); });
+  const branches = [];
+  const reachedBy = new Array(clusters.length).fill(null);
+  const seenEdge = new Uint8Array(finalEdges.length);
+  const queue = [root];
+  reachedBy[root] = "ROOT";
+  let trunkId = null;
+  while (queue.length) {
+    const c = queue.shift();
+    for (const ei of adj[c]) {
+      if (seenEdge[ei]) continue;
+      seenEdge[ei] = 1;
+      const e = finalEdges[ei];
+      const other = e.a === c ? e.b : e.a;
+      const ordered = e.a === c ? e.path : [...e.path].reverse();
+      const pts = ordered.map(p => ({ x: p % w, y: (p / w) | 0 }));
+      const thickArr = ordered.map(p => dt[p]);
+      const thickness = Math.max(3, Math.min(140, Math.round(2 * cvMedian(thickArr) / 3 / scale)));
+      const simple = cvSimplify(pts, 2).map(p => ({ x: p.x / scale, y: p.y / scale }));
+      if (simple.length < 2) continue;
+      const parent = reachedBy[c] === "ROOT" ? (trunkId === null ? null : trunkId) : reachedBy[c];
+      const br = { id: uid(), parentId: parent, points: simple, state: "develop",
+        label: parent === null ? "Trunk" : "", thickness };
+      if (parent === null) trunkId = br.id;
+      branches.push(br);
+      if (reachedBy[other] === null) { reachedBy[other] = br.id; queue.push(other); }
+    }
+  }
+  if (!branches.length) throw new Error("EMPTY");
+  return { branches };
+}
+
+/* ============================================================
    MAP TAB & EDITOR  (spec §4.4 — Phase 2, increment 1)
    ============================================================ */
 const STATE_COLORS = { develop: "#6F8F5A", hold: "#8B8678", shorten: "#C08A2D", remove: "#A8442F", wired: "#7A5C3E" };
@@ -2114,6 +2427,7 @@ async function renderMapEditor(main) {
     '<button class="mtool" data-mode="bud">🟡 Bud</button>' +
     '<button class="mtool" data-mode="select">👆 Select</button>' +
     '<button class="mtool" data-mode="cal">📏 Calibrate</button>' +
+    '<button class="mtool" id="m-auto">✨ Auto</button>' +
     '<button class="mtool" id="m-work">🪚 Work</button>' +
     '<button class="mtool" id="m-undo">↩ Undo</button>' +
     '<button class="mtool" id="m-redo">↪ Redo</button>' +
@@ -2327,7 +2641,7 @@ async function renderMapEditor(main) {
       '<label for="b-label" style="margin-top:8px">Label</label>' +
       '<input id="b-label" maxlength="40" placeholder="e.g. First branch left, sacrifice leader" value="' + esc(b.label || "") + '">' +
       '<label style="margin-top:10px">Thickness <span class="subtle" id="b-thick-val"></span></label>' +
-      '<input id="b-thick" type="range" min="2" max="90" step="1" value="' + (b.thickness || (b.parentId ? 5 : 9)) + '">' +
+      '<input id="b-thick" type="range" min="2" max="140" step="1" value="' + (b.thickness || (b.parentId ? 5 : 9)) + '">' +
       '<div class="statechips">' + BRANCH_STATES.map(([id, name]) =>
         '<button class="schip' + (b.state === id ? " active" : "") + '" data-state="' + id + '"' +
         (b.state === id ? ' style="background:' + STATE_COLORS[id] + '"' : "") + ">" + name + "</button>").join("") + "</div>" +
@@ -2478,6 +2792,43 @@ async function renderMapEditor(main) {
   main.querySelectorAll("[data-mode]").forEach(b =>
     b.addEventListener("click", () => setMode(b.getAttribute("data-mode"))));
   $("#m-end").addEventListener("click", commitActive);
+  $("#m-auto").addEventListener("click", () => {
+    if (!M.natW) { toast("Photo still loading"); return; }
+    if (M.map.branches.length) {
+      toast("Auto-propose needs an empty map — undo your tracing, or start a new map version");
+      return;
+    }
+    sheet("<h2>✨ Auto-propose branches</h2>" +
+      '<p class="subtle">Best results: leafless tree, plain wall or sheet behind it. The pot can sneak in as false branches — delete those after. Everything proposed is ordinary editable tracing, and a single Undo removes the lot. Thickness is measured from the photo; calibrate to turn it into mm.</p>' +
+      '<button class="btn" id="cv-go">Read the photo</button>' +
+      '<button class="btn secondary" id="cv-cancel">Cancel</button>',
+      (el) => {
+        el.querySelector("#cv-cancel").addEventListener("click", closeSheet);
+        el.querySelector("#cv-go").addEventListener("click", async () => {
+          closeSheet();
+          const ov = document.createElement("div");
+          ov.style.cssText = "position:fixed;inset:0;z-index:96;background:rgba(20,24,18,.86);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:#F4F1E6;font-weight:650;text-align:center;padding:0 30px";
+          ov.innerHTML = '<div style="font-size:42px">🌳</div><div id="cv-stage">Warming up…</div>';
+          document.body.appendChild(ov);
+          const stageEl = ov.querySelector("#cv-stage");
+          const prog = (t) => { stageEl.textContent = t; };
+          try {
+            const res = await cvProposeBranches(img, M.natW, M.natH, prog);
+            M.map.branches = res.branches;
+            pushHist();
+            redraw();
+            setMode("select");
+            hint("✨ " + res.branches.length + " branches proposed with measured thickness — review, fix, delete the pot if it snuck in. One Undo wipes the lot.");
+            toast("✨ " + res.branches.length + " branches proposed");
+          } catch (err) {
+            toast(err.message === "SEG"
+              ? "Couldn't separate tree from background — try a plainer backdrop, or trace manually"
+              : "Couldn't read a branch structure from this photo — trace manually or reshoot");
+          }
+          ov.remove();
+        });
+      });
+  });
   $("#m-work").addEventListener("click", () => {
     const actionable = M.map.branches.filter(b => ["shorten", "remove", "wired"].includes(b.state));
     if (!actionable.length) { toast("Tag branches Shorten / Remove / Wired first (Select tool)"); return; }
